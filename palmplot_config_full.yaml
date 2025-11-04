@@ -1,0 +1,270 @@
+# PALMPlot Full Configuration File - Figure-Based Naming
+# Complete configuration for all figures with full dataset
+# Updated to use figure-based naming (fig_1, fig_2, etc.) with automatic subfigure lettering
+
+# General Settings
+general:
+  project_name: "THF Forest Study - Full Analysis"
+  description: "Complete visualization of PALM-LES simulations for Tilia trees in Berlin"
+  stop_on_error: false  # Continue processing if individual plots fail
+  parallel_processing: false  # Set to false to avoid multiprocessing issues
+  n_workers: 4
+
+# Data Paths
+data:
+  # Base paths
+  simulation_base_path: "/mnt/f/phd/thf_forest_study/thf_forest_lad_cases_000"
+
+  # Tree locations
+  tree_locations_path: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/input/single_tree_locations"
+
+  # LAD/WAD data
+  lad_wad_data_path: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/input/output_single_tree_2m/LAD_WAD_grid_data_2m_gridv2_002_with_wad.csv"
+
+  # Simulation parameters - FULL DATASET
+  spacings: [10, 15, 20, 25]  # All tree spacings in meters
+  ages: [20, 40, 60, 80]      # All tree ages in years
+
+  # Domain settings
+  domains:
+    parent:
+      resolution: 10.0  # meters
+      grid_size: [400, 400]
+      first_data_level: 25  # zu_3d index with first data
+    child:
+      resolution: 2.0  # meters
+      grid_size: [200, 200]
+      first_data_level: 21  # zu_3d index with first data
+
+  # NetCDF file patterns
+  file_patterns:
+    av_3d: "OUTPUT/merged_files/{case_name}_av_3d{domain}_merged.nc"
+    av_3d_n02: "OUTPUT/merged_files/{case_name}_av_3d_N02_merged.nc"
+    av_xy: "OUTPUT/merged_files/{case_name}_av_xy{domain}_merged.nc"
+    av_xy_n02: "OUTPUT/merged_files/{case_name}_av_xy_N02_merged.nc"
+    static: "INPUT/{case_name}_static{domain}"
+    static_n02: "INPUT/{case_name}_static_N02"
+
+  # Variable mappings
+  variables:
+    temperature: "ta"
+    humidity: "q"
+    utci: "bio_utci*_xy"
+    radiation_net: "rad_net*_xy"
+    radiation_sw_in: "rad_sw_in*_xy"
+    radiation_lw_in: "rad_lw_in*_xy"
+    lad: "lad"
+
+# Output Settings
+output:
+  base_directory: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/results/full_analysis"
+  formats: ["png", "pdf"]  # PNG for quick viewing, PDF for publication
+  dpi: 300  # High quality output
+  transparent_background: false
+
+  file_naming:
+    prefix: "thf_forest"
+    include_timestamp: false
+    separator: "_"
+
+# Plot Configuration - FIGURE-BASED NAMING WITH AUTOMATIC SUBFIGURE LETTERING
+plots:
+  # Global plot settings
+  global_settings:
+    figure_size: [12, 8]  # inches
+    font_family: "DejaVu Sans"
+    font_size: 12
+    title_font_size: 16
+    label_font_size: 14
+    legend_font_size: 10
+    grid: true
+    grid_alpha: 0.3
+
+    # Publication quality settings
+    publication_quality:
+      enabled: true
+      tight_layout: true
+      remove_spines: false
+      high_contrast: true
+
+    # Color schemes
+    color_schemes:
+      temperature: "RdBu_r"
+      cooling: "Blues"
+      density: "Greens"
+      age: ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+      spacing: ["#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+
+  # FIGURE-SPECIFIC CONFIGURATIONS
+  # Output naming: fig_Xa_plot_type.format (e.g., fig_1a_density_matrix.png, fig_2a_time_series.png)
+  figures:
+    fig_1:
+      enabled: true
+      title: "Tree Density Scenarios"
+      description: "Visual matrix showing different tree ages and spacings"
+      plot_types:
+        density_matrix: true        # fig_1a_density_matrix
+        tree_visualization: false   # Disabled if LAD data missing
+        statistics_table: false
+      settings:
+        show_tree_count: true
+        show_canopy_area: true
+        highlight_optimal: true
+
+    fig_2:
+      enabled: true
+      title: "Temperature Dynamics"
+      description: "Age and density effects on air temperature"
+      plot_types:
+        time_series: true           # fig_2a_time_series
+        diurnal_cycle: true         # fig_2b_diurnal_cycle
+        temperature_difference: true  # fig_2c_temperature_difference
+      settings:
+        reference_height: 2.0  # meters
+        highlight_peak_hours: true
+        include_weather_data: false
+        show_confidence_bands: false
+
+    fig_3:
+      enabled: true
+      title: "Spatial Cooling Patterns"
+      description: "Horizontal temperature distribution at 2m height"
+      plot_types:
+        daytime_cooling: true       # fig_3a_daytime_cooling
+        nighttime_cooling: true     # fig_3b_nighttime_cooling
+        cooling_extent: false       # Placeholder - not fully implemented
+        temperature_maps: true      # fig_3c/d_temperature_maps (parent & child domains)
+      settings:
+        analysis_height: 0  # meters above ground
+        daytime_hour: 14  # 2 PM
+        nighttime_hour: 2  # 2 AM
+        show_tree_locations: false  # Disabled if tree location data missing
+        show_edge_effects: true
+        temp_vmin: 24  # Minimum temperature for color scale (°C)
+        temp_vmax: 30  # Maximum temperature for color scale (°C)
+        plot_parent_domain: true   # Enable parent domain plotting
+        plot_child_domain: true    # Enable child domain plotting
+
+    fig_4:
+      enabled: true
+      title: "Vertical Cooling Profile"
+      description: "Three-dimensional cooling structure"
+      plot_types:
+        vertical_cross_section: true  # fig_4a_vertical_cross_section
+        height_profiles: true         # fig_4b_height_profiles
+        canopy_analysis: false        # Disabled for this run
+      settings:
+        cross_section_x: 100  # Grid index
+        cross_section_y: 100  # Grid index
+        daytime_hour: 14  # For cross-section
+        show_canopy_height: true
+        show_mixing_height: false
+
+    fig_5:
+      enabled: true
+      title: "Age-Density-Cooling Relationship"
+      description: "Quantifying the cooling function"
+      plot_types:
+        surface_plot: true            # fig_5a_surface_plot
+        contour_plot: true            # fig_5b_contour_plot
+        optimization_analysis: false  # Disabled for this run
+      settings:
+        analysis_time: "max_cooling"  # max_cooling, daytime_avg, nighttime_avg
+        interpolation_method: "cubic"
+        show_optimal_points: true
+        include_regression: true
+
+    fig_6:
+      enabled: true
+      title: "Terrain-Following Transect Analysis"
+      description: "Air temperature and water vapor transects above terrain"
+      plot_types:
+        ta_parent_age: true           # fig_6a_ta_parent_age
+        ta_parent_spacing: true       # fig_6a_ta_parent_spacing
+        ta_child_age: true            # fig_6b_ta_child_age
+        ta_child_spacing: true        # fig_6b_ta_child_spacing
+        qv_parent_age: true           # fig_6c_qv_parent_age
+        qv_parent_spacing: true       # fig_6c_qv_parent_spacing
+        qv_child_age: true            # fig_6d_qv_child_age
+        qv_child_spacing: true        # fig_6d_qv_child_spacing
+      settings:
+        # Terrain-following mask
+        terrain_mask_height_z: 0      # Z-index offset (0=first grid point above topography)
+
+        # Time selection method for extracting 2D field from time series
+        # Options: 'max_variation' (auto-select time with max spatial variation),
+        #          'mean' (average all time steps),
+        #          'time_XX' (specific time index, e.g., 'time_38')
+        time_selection_method: "max_variation"
+
+        # Transect configuration
+        transect_axis: "x"            # "x" or "y" - which axis to slice through
+        transect_location: 200        # Grid index location of transect line
+        transect_width: 5             # Grid cells to average on each side
+
+        # Scenario comparisons (user configurable)
+        # Can specify single value or list for multiple groups
+        age_comparison:
+          constant_spacing: [10, 15, 20, 25]  # meters - can be single or list
+          varying_ages: [20, 40, 60, 80]      # years
+        spacing_comparison:
+          constant_age: [20, 40, 60, 80]      # years - can be single or list
+          varying_spacings: [10, 15, 20, 25]  # meters
+
+        # Color schemes and axis ranges
+        temperature_cmap: "RdBu_r"
+        # Temperature range: Use "auto" for automatic scaling or [min, max] for fixed range
+        temperature_range: "auto"  # or [24.0, 28.6] for fixed range (legacy mode)
+        qv_cmap: "YlGnBu"
+        # Water vapor range: Use "auto" for automatic scaling or [min, max] for fixed range
+        qv_range: "auto"  # or [0.00081, 0.00095] for fixed range (legacy mode)
+
+        # Shading
+        building_alpha: 0.5
+        building_color: "grey"
+        lad_alpha: 0.5
+        lad_color: "green"
+        transect_line_color: "magenta"
+        transect_line_style: "--"
+
+# Analysis Settings
+analysis:
+  # Temperature analysis
+  temperature:
+    reference_height: 2.0  # meters (human level)
+    analysis_times: ["daily_max", "daily_min", "daily_mean"]
+    cooling_threshold: 0.5  # °C minimum cooling to consider significant
+
+  # Spatial analysis
+  spatial:
+    grid_interpolation: true
+    smoothing_sigma: 1.0  # Grid cells
+    edge_buffer: 5  # Grid cells from domain edge
+
+  # Statistical analysis
+  statistics:
+    confidence_level: 0.95
+    bootstrap_iterations: 1000
+    include_uncertainty: false  # Disabled for faster processing
+
+# Logging Settings
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_file: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/logs/palmplot_full.log"
+  console_output: true
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Performance Settings
+performance:
+  chunk_size: 100  # MB - for reading large NetCDF files
+  cache_data: true  # Cache loaded data for reuse
+  compress_output: false  # Disabled for faster processing
+  multiprocessing: false  # Disabled to avoid issues
+
+# Validation Settings
+validation:
+  check_data_completeness: true
+  validate_units: true
+  check_missing_values: true
+  warn_on_outliers: true
+  outlier_threshold: 3.0  # Standard deviations

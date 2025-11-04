@@ -1,0 +1,233 @@
+# PALMPlot Test Configuration for fig_6 only
+# Quick test of terrain transect plotting
+
+# General Settings
+general:
+  project_name: "THF Forest Study - fig_6 Test"
+  description: "Test terrain-following transect plots"
+  stop_on_error: false
+  parallel_processing: false
+  n_workers: 4
+
+# Data Paths
+data:
+  # Base paths
+  simulation_base_path: "/mnt/f/phd/thf_forest_study/thf_forest_lad_cases_000"
+
+  # Tree locations
+  tree_locations_path: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/input/single_tree_locations"
+
+  # LAD/WAD data
+  lad_wad_data_path: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/input/output_single_tree_2m/LAD_WAD_grid_data_2m_gridv2_002_with_wad.csv"
+
+  # Scenarios to load - must include all scenarios used in plot settings below
+  spacings: [10, 15, 20, 25]    # All spacings needed for plots
+  ages: [20, 40, 60, 80]        # All ages needed for plots
+
+  # Domain settings
+  domains:
+    parent:
+      resolution: 10.0
+      grid_size: [400, 400]
+      first_data_level: 25
+    child:
+      resolution: 2.0
+      grid_size: [200, 200]
+      first_data_level: 21
+
+  # NetCDF file patterns
+  file_patterns:
+    av_3d: "OUTPUT/merged_files/{case_name}_av_3d{domain}_merged.nc"
+    av_3d_n02: "OUTPUT/merged_files/{case_name}_av_3d_N02_merged.nc"
+    av_xy: "OUTPUT/merged_files/{case_name}_av_xy{domain}_merged.nc"
+    av_xy_n02: "OUTPUT/merged_files/{case_name}_av_xy_N02_merged.nc"
+    static: "INPUT/{case_name}_static{domain}"
+    static_n02: "INPUT/{case_name}_static_N02"
+
+  # Variable mappings
+  variables:
+    temperature: "ta"
+    humidity: "q"
+    utci: "bio_utci*_xy"
+    radiation_net: "rad_net*_xy"
+    radiation_sw_in: "rad_sw_in*_xy"
+    radiation_lw_in: "rad_lw_in*_xy"
+    lad: "lad"
+
+# Output Settings
+output:
+  base_directory: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/results/fig6_test"
+  formats: ["png"]  # PNG only for testing
+  dpi: 150  # Lower DPI for faster testing
+  transparent_background: false
+
+  file_naming:
+    prefix: "thf_forest"
+    include_timestamp: false
+    separator: "_"
+
+# Plot Configuration
+plots:
+  # Global plot settings
+  global_settings:
+    figure_size: [12, 8]
+    font_family: "DejaVu Sans"
+    font_size: 12
+    title_font_size: 16
+    label_font_size: 14
+    legend_font_size: 10
+    grid: true
+    grid_alpha: 0.3
+
+    publication_quality:
+      enabled: true
+      tight_layout: true
+      remove_spines: false
+      high_contrast: true
+
+    color_schemes:
+      temperature: "RdBu_r"
+      cooling: "Blues"
+      density: "Greens"
+      age: ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+      spacing: ["#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+
+  # Test only fig_6
+  figures:
+    fig_6:
+      enabled: true
+      title: "Terrain-Following Transect Analysis"
+      description: "Air temperature and water vapor transects above terrain"
+      plot_types:
+        ta_parent_age: true           # Test with temperature parent age first
+        ta_parent_spacing: false      # Disable others for quick test
+        ta_child_age: true
+        ta_child_spacing: false
+        qv_parent_age: false
+        qv_parent_spacing: false
+        qv_child_age: false
+        qv_child_spacing: false
+      settings:
+        # ===== EXTRACTION METHOD =====
+        # Choose how to extract transect data from 4D [time, z, y, x] datasets:
+        #
+        # Options:
+        #   'slice_2d' (default): Extract full 2D spatial slice first, then extract transect
+        #     - Pros: Provides 2D context visualization (map view in bottom panel)
+        #     - Cons: Uses ~400× more memory (entire 2D slice is created)
+        #     - Use when: You want to see the spatial context map
+        #
+        #   'transect_direct': Extract 1D transect directly from 4D data
+        #     - Pros: ~400× more memory efficient (only extracts transect line)
+        #     - Cons: No 2D context map (single-panel plot only)
+        #     - Use when: Memory is limited or 2D visualization not needed
+        #
+        # Default: 'slice_2d' (preserves backward compatibility)
+        extraction_method: "slice_2d"  # or "transect_direct" for memory-efficient extraction
+
+        # Terrain-following mask - Height above near-surface level
+        # Z-offset from near-surface extraction level (default: 0)
+        # NOTE: Buildings are very tall (up to 40m), so we extract above most terrain+buildings
+        # For child domain: first_level=11 (zu_3d[11]=21m), z_offset=0 extracts at 21m height
+        # For parent domain: first_level=2 (zu_3d[2]=15m), z_offset=0 extracts at 15m height
+        # These heights balance data availability (avoiding NaN in buildings) with capturing cooling effects
+        # Increase z_offset to sample higher (e.g., z_offset=1 for next vertical level)
+        terrain_mask_height_z: 0
+
+        # Time selection method for extracting 2D field from time series
+        # Options:
+        #   'mean': Average over all available time steps (default)
+        #   'mean_timeframe': Average over a specified time range (requires time_start and time_end)
+        #   'single_timestep': Extract a SINGLE specific time step (requires time_index)
+        #
+        # Example for 'mean_timeframe':
+        #   time_selection_method: "mean_timeframe"
+        #   time_start: 12  # Start at time step 12 (inclusive, zero-based index)
+        #   time_end: 36    # End at time step 36 (inclusive, zero-based index)
+        #
+        # Example for 'single_timestep':
+        #   time_selection_method: "single_timestep"
+        #   time_index: 36  # Extract only time step 36 (zero-based index)
+        #
+        # Notes:
+        #   - Time indices are zero-based (first time step is 0)
+        #   - For 'mean' and 'mean_timeframe': Corrupted time steps are automatically detected and excluded
+        #   - For 'single_timestep': Extracts the specified step without averaging or corruption check
+        #   - Invalid ranges will fall back to using all time steps
+        #   - Time filtering is applied BEFORE corrupted time step detection
+        time_selection_method: "mean"
+        # time_index: 36  # Only used when time_selection_method is 'single_timestep'
+
+        # Time range for 'mean_timeframe' method (only used if time_selection_method == 'mean_timeframe')
+        # Uncomment and set these values to use a specific time range:
+        # time_start: 12  # Start time step index (inclusive, zero-based)
+        # time_end: 36    # End time step index (inclusive, zero-based)
+
+        # Transect configuration
+        transect_axis: "x"            # Slice along x-axis
+        transect_location: 100        # Middle of domain
+        transect_width: 0            # Average over ±1 grid cells
+
+        # Scenario comparisons
+        # Each constant_spacing or constant_age can be a list for multiple groups
+        age_comparison:
+          constant_spacing: [10]        # meters - can specify multiple groups
+          varying_ages: [20, 40, 60, 80]      # years
+        spacing_comparison:
+          constant_age: [20, 40, 60, 80]            # years - can specify multiple groups
+          varying_spacings: [10, 15, 20, 25]  # meters
+
+        # Color schemes and axis ranges
+        temperature_cmap: "RdBu_r"
+        # Temperature range: Use "auto" for automatic scaling or [min, max] for fixed range
+        temperature_range: "auto"  # or [23.5, 28.5] for fixed range
+        qv_cmap: "YlGnBu"
+        # Water vapor range: Use "auto" for automatic scaling or [min, max] for fixed range
+        qv_range: "auto"  # or [0.00081, 0.00095] for fixed range
+
+        # Shading
+        building_alpha: 0.5
+        building_color: "grey"
+        lad_alpha: 0.5
+        lad_color: "green"
+        transect_line_color: "magenta"
+        transect_line_style: "--"
+
+# Analysis Settings
+analysis:
+  temperature:
+    reference_height: 2.0
+    analysis_times: ["daily_max", "daily_min", "daily_mean"]
+    cooling_threshold: 0.5
+
+  spatial:
+    grid_interpolation: true
+    smoothing_sigma: 1.0
+    edge_buffer: 5
+
+  statistics:
+    confidence_level: 0.95
+    bootstrap_iterations: 1000
+    include_uncertainty: false
+
+# Logging Settings
+logging:
+  level: "DEBUG"  # Verbose for testing
+  log_file: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/logs/palmplot_fig6_test.log"
+  console_output: true
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Performance Settings
+performance:
+  chunk_size: 100
+  cache_data: true
+  compress_output: false
+  multiprocessing: false
+
+# Validation Settings
+validation:
+  check_data_completeness: true
+  validate_units: true
+  check_missing_values: true
+  warn_on_outliers: true
+  outlier_threshold: 3.0

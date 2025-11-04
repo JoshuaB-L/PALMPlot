@@ -1,0 +1,33 @@
+{
+	"folders": [
+		{
+			"name": "palmplot_thf",
+			"path": "."
+		},
+		{
+			"name": "f",
+			"path": "../../../../../../../mnt/f"
+		},
+		{
+			"name": "PhD",
+			"path": "../../../../../../../mnt/g/My Drive/Bath-Uni/PhD"
+		},
+		{
+			"name": "Paper-1-THF",
+			"path": "../../../../../../../mnt/g/My Drive/Bath-Uni/PhD/Structure/Paper-1-THF"
+		},
+		{
+			"path": "../../../../../../../mnt/f/phd/thf_forest_study/cases_000"
+		},
+		{
+			"path": "../../../../../../../mnt/g/My Drive/Bath-Uni/PhD/Structure/Paper-4-PALM-PCM-Study/Code/python/lad2palm"
+		},
+		{
+			"path": "../../../../../../../mnt/g/My Drive/Bath-Uni/PhD/Structure/Paper-4-PALM-PCM-Study/Code/python/pcm_itm/pcm_itm_tilia/pcm_itm-v2"
+		},
+		{
+			"path": "../../../../../../../mnt/archer2_mount"
+		}
+	],
+	"settings": {}
+}
