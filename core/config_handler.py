@@ -177,7 +177,147 @@ class ConfigHandler:
             enabled_plots = [p for p, enabled in item_config['plot_types'].items() if enabled]
             if not enabled_plots:
                 self.logger.warning(f"{item_id} is enabled but no plot types are selected")
-                
+
+            # Validate terrain-following settings if extraction_method is 'terrain_following'
+            if 'settings' in item_config:
+                settings = item_config['settings']
+                extraction_method = settings.get('extraction_method', 'slice_2d')
+
+                if extraction_method == 'terrain_following':
+                    self._validate_terrain_following_settings(item_id, settings)
+                elif extraction_method not in ['slice_2d', 'transect_direct', 'terrain_following']:
+                    raise ValueError(
+                        f"{item_id}: Invalid extraction_method '{extraction_method}'. "
+                        f"Must be one of: 'slice_2d', 'transect_direct', 'terrain_following'"
+                    )
+
+    def _validate_terrain_following_settings(self, item_id: str, settings: Dict):
+        """
+        Validate terrain-following specific settings.
+
+        Args:
+            item_id: Figure/slide identifier (for error messages)
+            settings: Settings dictionary for the plot
+        """
+        if 'terrain_following' not in settings:
+            self.logger.warning(
+                f"{item_id}: extraction_method is 'terrain_following' but no "
+                f"terrain_following settings found. Using defaults."
+            )
+            return
+
+        tf_settings = settings['terrain_following']
+
+        # Validate global output_mode
+        output_mode = tf_settings.get('output_mode', '2d')
+        if output_mode not in ['2d', '1d']:
+            raise ValueError(
+                f"{item_id}: Invalid terrain_following.output_mode '{output_mode}'. "
+                f"Must be '2d' or '1d'"
+            )
+
+        # Validate global buildings_mask
+        buildings_mask = tf_settings.get('buildings_mask', True)
+        if not isinstance(buildings_mask, bool):
+            raise ValueError(
+                f"{item_id}: terrain_following.buildings_mask must be boolean (true/false)"
+            )
+
+        # Validate global start_z_index
+        start_z_index = tf_settings.get('start_z_index', 0)
+        if not isinstance(start_z_index, int) or start_z_index < 0:
+            raise ValueError(
+                f"{item_id}: terrain_following.start_z_index must be non-negative integer, "
+                f"got {start_z_index}"
+            )
+
+        # Validate global max_z_index (optional)
+        max_z_index = tf_settings.get('max_z_index', None)
+        if max_z_index is not None:
+            if not isinstance(max_z_index, int) or max_z_index < 0:
+                raise ValueError(
+                    f"{item_id}: terrain_following.max_z_index must be non-negative integer or null, "
+                    f"got {max_z_index}"
+                )
+            if max_z_index < start_z_index:
+                raise ValueError(
+                    f"{item_id}: terrain_following.max_z_index ({max_z_index}) must be >= "
+                    f"start_z_index ({start_z_index})"
+                )
+
+        # Validate domain-specific settings if present
+        for domain in ['parent', 'child']:
+            if domain not in tf_settings:
+                continue
+
+            domain_settings = tf_settings[domain]
+            if not isinstance(domain_settings, dict):
+                raise ValueError(
+                    f"{item_id}: terrain_following.{domain} must be a dictionary"
+                )
+
+            # Validate domain-specific start_z_index
+            if 'start_z_index' in domain_settings:
+                domain_start_z = domain_settings['start_z_index']
+                if not isinstance(domain_start_z, int) or domain_start_z < 0:
+                    raise ValueError(
+                        f"{item_id}: terrain_following.{domain}.start_z_index must be "
+                        f"non-negative integer, got {domain_start_z}"
+                    )
+
+            # Validate domain-specific max_z_index
+            if 'max_z_index' in domain_settings:
+                domain_max_z = domain_settings['max_z_index']
+                if domain_max_z is not None:
+                    if not isinstance(domain_max_z, int) or domain_max_z < 0:
+                        raise ValueError(
+                            f"{item_id}: terrain_following.{domain}.max_z_index must be "
+                            f"non-negative integer or null, got {domain_max_z}"
+                        )
+                    # Check against domain-specific start_z_index if present
+                    domain_start = domain_settings.get('start_z_index', start_z_index)
+                    if domain_max_z < domain_start:
+                        raise ValueError(
+                            f"{item_id}: terrain_following.{domain}.max_z_index ({domain_max_z}) "
+                            f"must be >= start_z_index ({domain_start})"
+                        )
+
+            # Validate domain-specific transect_axis
+            if 'transect_axis' in domain_settings:
+                domain_axis = domain_settings['transect_axis']
+                if domain_axis not in ['x', 'y']:
+                    raise ValueError(
+                        f"{item_id}: terrain_following.{domain}.transect_axis must be 'x' or 'y', "
+                        f"got '{domain_axis}'"
+                    )
+
+            # Validate domain-specific transect_location
+            if 'transect_location' in domain_settings:
+                domain_loc = domain_settings['transect_location']
+                if not isinstance(domain_loc, int) or domain_loc < 0:
+                    raise ValueError(
+                        f"{item_id}: terrain_following.{domain}.transect_location must be "
+                        f"non-negative integer, got {domain_loc}"
+                    )
+
+            # Validate domain-specific transect_width
+            if 'transect_width' in domain_settings:
+                domain_width = domain_settings['transect_width']
+                if not isinstance(domain_width, int) or domain_width < 0:
+                    raise ValueError(
+                        f"{item_id}: terrain_following.{domain}.transect_width must be "
+                        f"non-negative integer, got {domain_width}"
+                    )
+
+            self.logger.debug(
+                f"{item_id}: Domain-specific terrain-following settings validated for '{domain}'"
+            )
+
+        self.logger.debug(
+            f"{item_id}: Terrain-following settings validated: output_mode={output_mode}, "
+            f"buildings_mask={buildings_mask}, start_z={start_z_index}, max_z={max_z_index}"
+        )
+
     def _expand_paths(self):
         """Expand relative paths to absolute paths"""
         # Expand user home directory

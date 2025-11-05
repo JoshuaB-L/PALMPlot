@@ -103,7 +103,23 @@ class PALMDataLoader:
             av_xy_n02_path = base_path / "OUTPUT/merged_files/thf_base_2018080700_av_xy_N02_merged.nc"
             if av_xy_n02_path.exists():
                 base_data['av_xy_n02'] = self._load_and_process_netcdf(av_xy_n02_path)
-                
+
+            # Load static driver (parent domain)
+            static_path = base_path / "INPUT/thf_base_2018080700_static"
+            if static_path.exists():
+                base_data['static'] = self._load_and_process_netcdf(static_path, is_static=True)
+                self.logger.info(f"Loaded base case static file (parent): {static_path}")
+            else:
+                self.logger.warning(f"Base case static file not found (parent): {static_path}")
+
+            # Load static driver (child domain)
+            static_n02_path = base_path / "INPUT/thf_base_2018080700_static_N02"
+            if static_n02_path.exists():
+                base_data['static_n02'] = self._load_and_process_netcdf(static_n02_path, is_static=True)
+                self.logger.info(f"Loaded base case static file (child): {static_n02_path}")
+            else:
+                self.logger.warning(f"Base case static file not found (child): {static_n02_path}")
+
             return base_data if base_data else None
             
         except Exception as e:

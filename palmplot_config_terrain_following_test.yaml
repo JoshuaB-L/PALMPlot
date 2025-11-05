@@ -1,0 +1,226 @@
+# PALMPlot Test Configuration for Terrain-Following Extraction
+# Tests the new terrain-following method that fills from lowest vertical level upwards
+
+# General Settings
+general:
+  project_name: "THF Forest Study - Terrain-Following Test"
+  description: "Test terrain-following extraction with building mask options"
+  stop_on_error: false
+  parallel_processing: false
+  n_workers: 4
+
+# Data Paths
+data:
+  # Base paths
+  simulation_base_path: "/mnt/f/phd/thf_forest_study/thf_forest_lad_cases_000"
+
+  # Tree locations
+  tree_locations_path: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/input/single_tree_locations"
+
+  # LAD/WAD data
+  lad_wad_data_path: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/input/output_single_tree_2m/LAD_WAD_grid_data_2m_gridv2_002_with_wad.csv"
+
+  # Scenarios to load - must include all scenarios used in plot settings below
+  spacings: [10, 15, 20, 25]    # All spacing scenarios
+  ages: [20, 40, 60, 80]        # All age scenarios
+
+  # Domain settings
+  domains:
+    parent:
+      resolution: 10.0
+      grid_size: [400, 400]
+      first_data_level: 25
+    child:
+      resolution: 2.0
+      grid_size: [200, 200]
+      first_data_level: 21
+
+  # NetCDF file patterns
+  file_patterns:
+    av_3d: "OUTPUT/merged_files/{case_name}_av_3d{domain}_merged.nc"
+    av_3d_n02: "OUTPUT/merged_files/{case_name}_av_3d_N02_merged.nc"
+    av_xy: "OUTPUT/merged_files/{case_name}_av_xy{domain}_merged.nc"
+    av_xy_n02: "OUTPUT/merged_files/{case_name}_av_xy_N02_merged.nc"
+    static: "INPUT/{case_name}_static{domain}"
+    static_n02: "INPUT/{case_name}_static_N02"
+
+  # Variable mappings
+  variables:
+    temperature: "ta"
+    humidity: "q"
+    utci: "bio_utci*_xy"
+    radiation_net: "rad_net*_xy"
+    radiation_sw_in: "rad_sw_in*_xy"
+    radiation_lw_in: "rad_lw_in*_xy"
+    lad: "lad"
+
+# Output Settings
+output:
+  base_directory: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/results/terrain_following_test"
+  formats: ["png"]  # PNG only for testing
+  dpi: 150  # Lower DPI for faster testing
+  transparent_background: false
+
+  file_naming:
+    prefix: "thf_terrain_following"
+    include_timestamp: false
+    separator: "_"
+
+# Plot Configuration
+plots:
+  # Global plot settings
+  global_settings:
+    figure_size: [12, 8]
+    font_family: "DejaVu Sans"
+    font_size: 12
+    title_font_size: 16
+    label_font_size: 14
+    legend_font_size: 10
+    grid: true
+    grid_alpha: 0.3
+
+    publication_quality:
+      enabled: true
+      tight_layout: true
+      remove_spines: false
+      high_contrast: true
+
+    color_schemes:
+      temperature: "RdBu_r"
+      cooling: "Blues"
+      density: "Greens"
+      age: ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+      spacing: ["#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+
+  # Test fig_6 with terrain-following method
+  figures:
+    fig_6:
+      enabled: true
+      title: "Terrain-Following Transect Analysis (New Method)"
+      description: "Testing terrain-following extraction from lowest vertical level"
+      plot_types:
+        ta_parent_age: true           # Test with temperature parent age
+        ta_child_age: true            # Test with temperature child age
+        ta_parent_spacing: false      # Disable for quick test
+        ta_child_spacing: false
+        qv_parent_age: false
+        qv_parent_spacing: false
+        qv_child_age: false
+        qv_child_spacing: false
+      settings:
+        # ===== EXTRACTION METHOD =====
+        # NEW: Use 'terrain_following' method
+        extraction_method: "terrain_following"
+
+        # ===== TERRAIN-FOLLOWING SETTINGS =====
+        # (Only used when extraction_method == 'terrain_following')
+        terrain_following:
+          # ===== GLOBAL SETTINGS (apply to both domains unless overridden) =====
+
+          # Output mode: '2d' for full spatial field, '1d' for transect only
+          output_mode: "2d"  # Use 2D to get map visualization in bottom panel
+
+          # Building mask: true = exclude buildings (leave as NaN), false = fill through buildings
+          buildings_mask: true  # Test with building mask ON first
+
+          # Global defaults for vertical iteration
+          # These apply to both parent and child domains unless overridden below
+          start_z_index: 0  # Start from absolute lowest level (zu_3d[0])
+          max_z_index: 10   # Default max level (can be overridden per domain)
+
+          # Global defaults for transect settings
+          # These apply to both parent and child domains unless overridden below
+          # (Can be omitted here if specified in main settings block above)
+
+          # ===== DOMAIN-SPECIFIC OVERRIDES =====
+          # You can override any setting independently for parent or child domains
+          # Settings hierarchy: domain-specific > global > main settings
+
+          # Parent domain (10m resolution, 400×400m)
+          parent:
+            start_z_index: 0     # Start from zu_3d[0] (~0m)
+            max_z_index: 10      # Stop at zu_3d[10] (~95m for parent)
+            transect_axis: "x"   # Can override transect axis per domain
+            transect_location: 200  # Can override transect location per domain
+            transect_width: 0    # Can override averaging width per domain
+
+          # Child domain (2m resolution, 200×200m)
+          child:
+            start_z_index: 0     # Start from zu_3d[0] (~0m)
+            max_z_index: 25      # Stop at zu_3d[20] (~40m for child, similar coverage)
+            transect_axis: "x"   # Same as parent, but can be different
+            transect_location: 100  # Middle of child domain
+            transect_width: 0    # No averaging
+
+        # Time selection method
+        # Options: 'mean', 'mean_timeframe', 'single_timestep'
+        time_selection_method: "mean"  # Average over all time steps
+
+        # Transect configuration
+        #transect_axis: "x"            # Slice along x-axis
+        #transect_location: 100        # Middle of domain
+        #transect_width: 0             # No averaging (single line)
+
+        # Scenario comparisons
+        age_comparison:
+          constant_spacing: [10, 15, 20, 25]              # meters
+          varying_ages: [20, 40, 60, 80]              # years (reduced for testing)
+        spacing_comparison:
+          constant_age: [20, 40, 60, 80]              # years (reduced for testing)
+          varying_spacings: [10, 15, 20, 25]          # meters (reduced for testing)
+
+        # Color schemes and axis ranges
+        temperature_cmap: "RdBu_r"
+        temperature_range: "auto"  # Automatic scaling
+        qv_cmap: "YlGnBu"
+        qv_range: "auto"
+
+        # Shading
+        building_alpha: 0.5
+        building_color: "grey"
+        lad_alpha: 0.5
+        lad_color: "green"
+        transect_line_color: "magenta"
+        transect_line_style: "--"
+
+        # Terrain mask height (not used in terrain_following mode, but kept for compatibility)
+        terrain_mask_height_z: 0
+
+# Analysis Settings
+analysis:
+  temperature:
+    reference_height: 2.0
+    analysis_times: ["daily_max", "daily_min", "daily_mean"]
+    cooling_threshold: 0.5
+
+  spatial:
+    grid_interpolation: true
+    smoothing_sigma: 1.0
+    edge_buffer: 5
+
+  statistics:
+    confidence_level: 0.95
+    bootstrap_iterations: 1000
+    include_uncertainty: false
+
+# Logging Settings
+logging:
+  level: "INFO"  # INFO level for terrain-following testing
+  log_file: "/home/joshuabl/phd/thf/thf_forest_study/code/python/palmplot_thf/logs/palmplot_terrain_following_test.log"
+  console_output: true
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Performance Settings
+performance:
+  chunk_size: 100
+  cache_data: true
+  compress_output: false
+  multiprocessing: false
+
+# Validation Settings
+validation:
+  check_data_completeness: true
+  validate_units: true
+  check_missing_values: true
+  warn_on_outliers: true
+  outlier_threshold: 3.0

@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.colors import Normalize
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 import logging
 import xarray as xr
 
@@ -740,6 +740,496 @@ class TerrainTransectPlotter(BasePlotter):
             self.logger.error(f"Error extracting direct transect: {str(e)}")
             raise
 
+    # ========================================================================
+    # Fill Value Detection Utilities (for terrain-following extraction)
+    # ========================================================================
+
+    def _detect_fill_values(self, data_array: xr.DataArray) -> Tuple[bool, float]:
+        """
+        Detect fill value from xarray DataArray attributes or use common defaults.
+
+        PALM-LES data may use various conventions for marking missing/invalid data:
+        - NaN (numpy/xarray convention)
+        - _FillValue attribute (NetCDF convention)
+        - missing_value attribute (alternative NetCDF convention)
+        - Common sentinel values: -9999, -127
+
+        Args:
+            data_array: xarray DataArray to analyze
+
+        Returns:
+            Tuple of (has_fill_value, fill_value)
+            - has_fill_value: Always True (defaults to NaN if no explicit fill value)
+            - fill_value: The detected or default fill value
+        """
+        # Check for _FillValue attribute (NetCDF standard)
+        if '_FillValue' in data_array.attrs:
+            fill_val = float(data_array.attrs['_FillValue'])
+            self.logger.debug(f"Detected _FillValue attribute: {fill_val}")
+            return True, fill_val
+
+        # Check for missing_value attribute (alternative NetCDF convention)
+        if 'missing_value' in data_array.attrs:
+            fill_val = float(data_array.attrs['missing_value'])
+            self.logger.debug(f"Detected missing_value attribute: {fill_val}")
+            return True, fill_val
+
+        # Check for common sentinel values in the data
+        # Note: Only check a sample to avoid expensive operations on large arrays
+        sample_data = data_array.values.ravel()[:10000]  # Sample first 10k values
+        sample_data_clean = sample_data[~np.isnan(sample_data)]  # Remove NaN for analysis
+
+        if len(sample_data_clean) > 0:
+            # Check for -9999 (common fill value)
+            if np.any(np.isclose(sample_data_clean, -9999)):
+                self.logger.debug("Detected -9999 fill value in data")
+                return True, -9999.0
+
+            # Check for -127 (sometimes used for integer data)
+            if np.any(np.isclose(sample_data_clean, -127)):
+                self.logger.debug("Detected -127 fill value in data")
+                return True, -127.0
+
+        # Default to NaN (xarray/numpy convention)
+        self.logger.debug("No explicit fill value detected, defaulting to NaN")
+        return True, np.nan
+
+    def _is_fill_value(self, value: float, fill_value: float) -> bool:
+        """
+        Check if a value is a fill value (handles NaN comparison correctly).
+
+        Args:
+            value: Value to check
+            fill_value: Reference fill value
+
+        Returns:
+            True if value matches fill_value (including NaN==NaN case)
+        """
+        # Handle NaN comparison (NaN != NaN in normal comparison)
+        if np.isnan(fill_value):
+            return np.isnan(value)
+        else:
+            # Use isclose for floating point comparison to handle precision issues
+            # Also check exact equality for integer-like fill values
+            return np.isclose(value, fill_value, rtol=1e-9, atol=1e-9) or value == fill_value
+
+    # ========================================================================
+    # Terrain-Following Extraction Method
+    # ========================================================================
+
+    def _extract_terrain_following(self,
+                                     dataset: xr.Dataset,
+                                     static_dataset: xr.Dataset,
+                                     domain_type: str,
+                                     buildings_mask: bool,
+                                     output_mode: str,
+                                     transect_axis: str = None,
+                                     transect_location: int = None,
+                                     transect_width: int = 0,
+                                     settings: Dict = None) -> Union[Tuple[np.ndarray, str, bool],
+                                                                     Tuple[np.ndarray, np.ndarray, str, bool]]:
+        """
+        Extract terrain-following data by iterating from lowest vertical level upwards.
+
+        This method implements a "bottom-up" filling algorithm:
+        1. Start from zu_3d[0] (lowest vertical level)
+        2. For each grid cell, use the first valid (non-fill) value encountered
+        3. Iterate upwards through vertical levels, filling only empty cells
+        4. Optional building masking: exclude buildings (leave as NaN) or fill through them
+
+        The algorithm provides scientifically accurate terrain-following extraction by
+        always using the lowest available valid data above terrain/buildings.
+
+        Args:
+            dataset: xarray Dataset containing 3D averaged data (av_3d)
+            static_dataset: xarray Dataset containing topography and buildings
+            domain_type: 'parent' or 'child'
+            buildings_mask: If True, exclude building locations (leave as NaN)
+                           If False, fill through buildings from level above
+            output_mode: '2d' for full spatial field, '1d' for transect only
+            transect_axis: 'x' or 'y' (required for 1d mode)
+            transect_location: Grid index for transect (required for 1d mode)
+            transect_width: Number of grid cells to average (for 1d mode)
+            settings: Plot settings dict (optional, used for time selection parameters)
+
+        Returns:
+            If output_mode == '2d':
+                Tuple of (filled_2d_array [y, x], variable_name, needs_kelvin_conversion)
+            If output_mode == '1d':
+                Tuple of (transect_1d_array, coordinates, variable_name, needs_kelvin_conversion)
+
+        Raises:
+            ValueError: If invalid output_mode or required parameters missing
+            KeyError: If variable not found in dataset
+        """
+        # Validate parameters
+        if output_mode not in ['2d', '1d']:
+            raise ValueError(f"Invalid output_mode: {output_mode}. Must be '2d' or '1d'")
+
+        if output_mode == '1d' and (transect_axis is None or transect_location is None):
+            raise ValueError("transect_axis and transect_location required for 1d output mode")
+
+        # Default settings if none provided
+        if settings is None:
+            settings = {}
+
+        # Log extraction configuration
+        msg = f"\n=== TERRAIN-FOLLOWING EXTRACTION ==="
+        print(msg)
+        self.logger.info(msg)
+
+        msg = f"  Domain: {domain_type}"
+        print(msg)
+        self.logger.info(msg)
+
+        msg = f"  Output mode: {output_mode}"
+        print(msg)
+        self.logger.info(msg)
+
+        msg = f"  Buildings mask: {buildings_mask} ({'exclude buildings' if buildings_mask else 'fill through buildings'})"
+        print(msg)
+        self.logger.info(msg)
+
+        if output_mode == '1d':
+            msg = f"  Transect: axis={transect_axis}, location={transect_location}, width=±{transect_width}"
+            print(msg)
+            self.logger.info(msg)
+
+        try:
+            # Get terrain-following specific settings
+            tf_settings = settings.get('terrain_following', {})
+
+            # Support domain-specific settings with fallback to global defaults
+            # Check for domain-specific overrides (parent/child)
+            domain_settings = tf_settings.get(domain_type, {})
+
+            # Get start_z_index: domain-specific > global > default (0)
+            start_z_index = domain_settings.get('start_z_index',
+                                               tf_settings.get('start_z_index', 0))
+
+            # Get max_z_index: domain-specific > global > default (None)
+            max_z_index = domain_settings.get('max_z_index',
+                                             tf_settings.get('max_z_index', None))
+
+            # Log which settings source was used
+            if domain_type in tf_settings:
+                self.logger.debug(f"Using domain-specific terrain_following settings for '{domain_type}'")
+            else:
+                self.logger.debug(f"Using global terrain_following settings for '{domain_type}'")
+
+            msg = f"  Vertical iteration: start_z={start_z_index}"
+            if max_z_index is not None:
+                msg += f", max_z={max_z_index}"
+            else:
+                msg += ", max_z=all levels"
+            print(msg)
+            self.logger.info(msg)
+
+            # Find the variable (ta or qv)
+            var_data = None
+            var_name_found = None
+            for var_name in ['ta', 'qv', 'theta']:
+                if var_name in dataset:
+                    var_data = dataset[var_name]
+                    var_name_found = var_name
+                    self.logger.debug(f"Found variable: {var_name}")
+                    break
+
+            if var_data is None:
+                available_vars = list(dataset.data_vars.keys())
+                self.logger.error(f"Could not find temperature or humidity variable. Available: {available_vars}")
+                raise KeyError("Could not find temperature or humidity variable in dataset")
+
+            # Detect fill values
+            has_fill_value, fill_value = self._detect_fill_values(var_data)
+            msg = f"  Fill value: {fill_value} ({'NaN' if np.isnan(fill_value) else fill_value})"
+            print(msg)
+            self.logger.info(msg)
+
+            # Get vertical dimension and coordinates
+            if 'zu_3d' in dataset.dims or 'zw_3d' in dataset.dims:
+                z_dim = 'zu_3d' if 'zu_3d' in dataset.dims else 'zw_3d'
+                z_coords = dataset[z_dim].values
+                n_z_levels = len(z_coords)
+
+                msg = f"  Vertical levels: {n_z_levels} (heights: {z_coords[0]:.2f}m to {z_coords[-1]:.2f}m)"
+                print(msg)
+                self.logger.info(msg)
+            else:
+                raise ValueError(f"Could not find vertical dimension (zu_3d or zw_3d) in dataset")
+
+            # Validate z-index range
+            if start_z_index < 0 or start_z_index >= n_z_levels:
+                self.logger.error(f"start_z_index {start_z_index} out of range [0, {n_z_levels})")
+                raise ValueError(f"Invalid start_z_index: {start_z_index}")
+
+            if max_z_index is not None:
+                if max_z_index < start_z_index or max_z_index >= n_z_levels:
+                    self.logger.warning(f"max_z_index {max_z_index} out of range, using all levels")
+                    max_z_index = None
+
+            # Determine effective max z-index
+            effective_max_z = max_z_index if max_z_index is not None else (n_z_levels - 1)
+
+            # STEP 1: TIME AVERAGING
+            # Apply time selection/averaging using existing logic (same as other extraction methods)
+            msg = f"\n=== TIME SELECTION CONFIGURATION ==="
+            print(msg)
+            self.logger.info(msg)
+
+            time_selection_method = settings.get('time_selection_method', 'mean')
+            total_time_steps = var_data.shape[0]
+
+            msg = f"  Total available time steps: {total_time_steps}"
+            print(msg)
+            self.logger.info(msg)
+
+            msg = f"  Method: '{time_selection_method}'"
+            print(msg)
+            self.logger.info(msg)
+
+            # Apply time selection (same logic as _extract_terrain_following_slice)
+            var_data_time_selected = var_data
+
+            if time_selection_method == 'single_timestep':
+                time_index = settings.get('time_index', 0)
+                if time_index < 0 or time_index >= total_time_steps:
+                    self.logger.warning(f"time_index {time_index} out of range, using 0")
+                    time_index = 0
+                var_data_time_selected = var_data.isel(time=[time_index])
+                self.logger.info(f"  Selected single time step: {time_index}")
+
+            elif time_selection_method == 'mean_timeframe':
+                time_start = settings.get('time_start', 0)
+                time_end = settings.get('time_end', total_time_steps - 1)
+
+                # Validate and clip range
+                time_start = max(0, min(time_start, total_time_steps - 1))
+                time_end = max(time_start, min(time_end, total_time_steps - 1))
+
+                time_indices = list(range(time_start, time_end + 1))
+                var_data_time_selected = var_data.isel(time=time_indices)
+                self.logger.info(f"  Selected time range: [{time_start}, {time_end}] ({len(time_indices)} steps)")
+
+            else:  # 'mean' - use all time steps
+                self.logger.info(f"  Using all {total_time_steps} time steps")
+
+            # Perform time averaging (or extract single step)
+            if time_selection_method == 'single_timestep':
+                # Extract single time step (no averaging)
+                var_data_time_avg = var_data_time_selected.isel(time=0)
+                msg = f"  Time processing: Extracted single timestep (no averaging)"
+            else:
+                # Perform averaging with corrupted step detection
+                msg = f"  Time processing: Averaging with corrupted step detection..."
+                print(msg)
+                self.logger.info(msg)
+
+                # Detect and exclude corrupted time steps (T < 5°C indicates corrupted data)
+                n_time_before = var_data_time_selected.shape[0]
+                valid_time_mask = []
+
+                for t_idx in range(n_time_before):
+                    # Use dictionary unpacking to avoid syntax error with dynamic dimension name
+                    selection = {'time': t_idx, z_dim: start_z_index}
+                    slice_t = var_data_time_selected.isel(**selection)
+                    test_values = slice_t.values.ravel()
+                    test_values_clean = test_values[~np.isnan(test_values)]
+
+                    if len(test_values_clean) > 0:
+                        suspicious = np.any(test_values_clean < 5.0)
+                        valid_time_mask.append(not suspicious)
+                    else:
+                        valid_time_mask.append(True)
+
+                valid_time_mask = np.array(valid_time_mask)
+                n_corrupted = np.sum(~valid_time_mask)
+                n_valid = np.sum(valid_time_mask)
+
+                if n_corrupted > 0:
+                    msg = f"  Found {n_corrupted} corrupted time steps, using {n_valid} valid steps"
+                    print(msg)
+                    self.logger.warning(msg)
+
+                    valid_indices = np.where(valid_time_mask)[0]
+                    var_data_time_selected = var_data_time_selected.isel(time=valid_indices)
+                else:
+                    msg = f"  All {n_time_before} time steps are valid"
+                    print(msg)
+                    self.logger.info(msg)
+
+                # Perform time averaging using xarray
+                var_data_time_avg = var_data_time_selected.mean(dim='time')
+                msg = f"  Time averaging complete"
+
+            print(msg)
+            self.logger.info(msg)
+
+            # Now var_data_time_avg has shape [zu_3d, y, x] (time dimension removed)
+
+            # STEP 2: LOAD BUILDING MASK (if needed)
+            building_mask_2d = None
+            if buildings_mask and static_dataset is not None and 'buildings_2d' in static_dataset:
+                building_mask_2d = static_dataset['buildings_2d'].values > 0
+                n_building_cells = np.sum(building_mask_2d)
+                total_cells = building_mask_2d.size
+                pct_buildings = 100 * n_building_cells / total_cells
+
+                msg = f"  Building mask loaded: {n_building_cells}/{total_cells} cells ({pct_buildings:.1f}%) are buildings"
+                print(msg)
+                self.logger.info(msg)
+            elif buildings_mask and (static_dataset is None or 'buildings_2d' not in static_dataset):
+                self.logger.warning("buildings_mask=True but buildings_2d not available in static dataset")
+                buildings_mask = False  # Disable mask if data not available
+
+            # STEP 3: TERRAIN-FOLLOWING ITERATION
+            msg = f"\n=== VERTICAL ITERATION (TERRAIN-FOLLOWING) ==="
+            print(msg)
+            self.logger.info(msg)
+
+            # Get spatial dimensions
+            ny, nx = var_data_time_avg.shape[-2:]
+
+            msg = f"  Spatial dimensions: y={ny}, x={nx}"
+            print(msg)
+            self.logger.info(msg)
+
+            # Initialize output array with NaN
+            filled_array = np.full((ny, nx), np.nan, dtype=np.float64)
+
+            # Track which z-level each cell was filled from (for debugging/visualization)
+            source_level_array = np.full((ny, nx), -1, dtype=np.int32)
+
+            # Iterate through vertical levels from bottom to top
+            n_z_to_process = effective_max_z - start_z_index + 1
+            n_filled_total = 0
+
+            for z_idx in range(start_z_index, effective_max_z + 1):
+                # Extract 2D slice at this level
+                slice_2d = var_data_time_avg.isel({z_dim: z_idx}).values
+
+                # Find cells that are:
+                # 1. Currently unfilled (NaN in filled_array)
+                # 2. Have valid data at this level (not fill_value)
+                # 3. Not masked by buildings (if buildings_mask=True)
+
+                currently_unfilled = np.isnan(filled_array)
+                has_valid_data = ~self._is_fill_value(slice_2d, fill_value)
+
+                # If buildings_mask=True, exclude building locations
+                if buildings_mask and building_mask_2d is not None:
+                    not_building = ~building_mask_2d
+                else:
+                    not_building = np.ones_like(currently_unfilled, dtype=bool)
+
+                # Combine all conditions
+                fillable_mask = currently_unfilled & has_valid_data & not_building
+
+                n_filled_this_level = np.sum(fillable_mask)
+
+                # Fill cells that meet all conditions
+                filled_array[fillable_mask] = slice_2d[fillable_mask]
+                source_level_array[fillable_mask] = z_idx
+
+                n_filled_total += n_filled_this_level
+
+                # Log progress every 5 levels or on first/last level
+                if z_idx == start_z_index or z_idx == effective_max_z or (z_idx - start_z_index) % 5 == 0:
+                    height_m = z_coords[z_idx]
+                    n_unfilled_remaining = np.sum(np.isnan(filled_array))
+                    pct_filled = 100 * n_filled_total / (ny * nx)
+
+                    msg = f"  Level {z_idx:2d} ({height_m:6.2f}m): filled {n_filled_this_level:5d} cells | " \
+                          f"Total filled: {n_filled_total:6d} ({pct_filled:5.1f}%) | Remaining: {n_unfilled_remaining:6d}"
+                    print(msg)
+                    self.logger.info(msg)
+
+            # Final statistics
+            n_filled_final = np.sum(~np.isnan(filled_array))
+            n_unfilled_final = np.sum(np.isnan(filled_array))
+            pct_filled_final = 100 * n_filled_final / (ny * nx)
+
+            msg = f"\n=== TERRAIN-FOLLOWING ITERATION COMPLETE ==="
+            print(msg)
+            self.logger.info(msg)
+
+            msg = f"  Processed {n_z_to_process} vertical levels (zu_3d[{start_z_index}] to zu_3d[{effective_max_z}])"
+            print(msg)
+            self.logger.info(msg)
+
+            msg = f"  Final coverage: {n_filled_final}/{ny*nx} cells ({pct_filled_final:.1f}%) filled, {n_unfilled_final} remaining NaN"
+            print(msg)
+            self.logger.info(msg)
+
+            if n_filled_final == 0:
+                self.logger.error("No valid data found in any vertical level!")
+                raise ValueError("Terrain-following extraction produced all NaN")
+
+            # Log source level statistics
+            valid_source_levels = source_level_array[source_level_array >= 0]
+            if len(valid_source_levels) > 0:
+                min_source = np.min(valid_source_levels)
+                max_source = np.max(valid_source_levels)
+                mean_source = np.mean(valid_source_levels)
+
+                msg = f"  Source levels: min=zu_3d[{min_source}] ({z_coords[min_source]:.2f}m), " \
+                      f"max=zu_3d[{max_source}] ({z_coords[max_source]:.2f}m), " \
+                      f"mean=zu_3d[{int(mean_source)}] ({z_coords[int(mean_source)]:.2f}m)"
+                print(msg)
+                self.logger.info(msg)
+
+            # STEP 4: GENERATE OUTPUT BASED ON OUTPUT_MODE
+            valid_data = filled_array[~np.isnan(filled_array)]
+            if len(valid_data) > 0:
+                data_min = np.min(valid_data)
+                data_max = np.max(valid_data)
+                data_mean = np.mean(valid_data)
+
+                msg = f"  Data range: min={data_min:.2f}, max={data_max:.2f}, mean={data_mean:.2f}"
+                print(msg)
+                self.logger.info(msg)
+
+                # Detect if conversion from Kelvin needed
+                needs_kelvin_conversion = data_mean > 100.0
+                msg = f"  Temperature unit: needs_kelvin_conversion={needs_kelvin_conversion}"
+                print(msg)
+                self.logger.info(msg)
+            else:
+                needs_kelvin_conversion = False
+
+            if output_mode == '2d':
+                # Return full 2D field
+                msg = f"\n=== OUTPUT: 2D field ({ny}x{nx}) ==="
+                print(msg)
+                self.logger.info(msg)
+
+                return filled_array, var_name_found, needs_kelvin_conversion
+
+            else:  # output_mode == '1d'
+                # Extract transect from filled 2D field
+                msg = f"\n=== OUTPUT: 1D transect extraction ==="
+                print(msg)
+                self.logger.info(msg)
+
+                transect_values, coordinates = self._extract_transect_line(
+                    filled_array, transect_axis, transect_location, transect_width
+                )
+
+                msg = f"  Transect length: {len(transect_values)}"
+                print(msg)
+                self.logger.info(msg)
+
+                n_valid_transect = np.sum(~np.isnan(transect_values))
+                msg = f"  Valid points: {n_valid_transect}/{len(transect_values)} ({100*n_valid_transect/len(transect_values):.1f}%)"
+                print(msg)
+                self.logger.info(msg)
+
+                return transect_values, coordinates, var_name_found, needs_kelvin_conversion
+
+        except Exception as e:
+            self.logger.error(f"Error in terrain-following extraction: {str(e)}")
+            raise
+
     def _time_average_data(self, data_3d: np.ndarray, method: str = 'mean') -> np.ndarray:
         """
         Extract representative 2D field from time series
@@ -1079,9 +1569,10 @@ class TerrainTransectPlotter(BasePlotter):
                                settings: Dict) -> Optional[Dict]:
         """
         Extract transect data for a single scenario
-        Supports two extraction methods based on settings['extraction_method']:
-          - 'slice_2d' (default): Extract full 2D slice, then extract transect
+        Supports three extraction methods based on settings['extraction_method']:
+          - 'slice_2d' (default): Extract full 2D slice at fixed height, then extract transect
           - 'transect_direct': Extract 1D transect directly from 4D data (~400× more memory efficient)
+          - 'terrain_following': Fill from lowest vertical level upwards (true terrain-following)
 
         Args:
             data: All loaded simulation data
@@ -1128,11 +1619,27 @@ class TerrainTransectPlotter(BasePlotter):
             # Get extraction method from settings (default to slice_2d for backward compatibility)
             extraction_method = settings.get('extraction_method', 'slice_2d')
 
-            # Get common parameters
-            z_offset = settings['terrain_mask_height_z']
-            transect_axis = settings['transect_axis']
-            transect_location = settings['transect_location']
-            transect_width = settings['transect_width']
+            # Get common parameters with domain-specific override support
+            # For terrain_following method, check for domain-specific settings first
+            if extraction_method == 'terrain_following':
+                tf_settings = settings.get('terrain_following', {})
+                domain_settings = tf_settings.get(domain, {})
+
+                # Use domain-specific if available, else fall back to global settings
+                transect_axis = domain_settings.get('transect_axis', settings.get('transect_axis'))
+                transect_location = domain_settings.get('transect_location', settings.get('transect_location'))
+                transect_width = domain_settings.get('transect_width', settings.get('transect_width', 0))
+                z_offset = domain_settings.get('terrain_mask_height_z', settings.get('terrain_mask_height_z', 0))
+
+                if domain in tf_settings:
+                    self.logger.debug(f"Using domain-specific transect settings for '{domain}': "
+                                     f"axis={transect_axis}, location={transect_location}, width={transect_width}")
+            else:
+                # For other methods, use global settings with defaults
+                z_offset = settings.get('terrain_mask_height_z', 0)
+                transect_axis = settings.get('transect_axis', 'x')
+                transect_location = settings.get('transect_location', 100)
+                transect_width = settings.get('transect_width', 0)
 
             # Route to appropriate extraction method
             if extraction_method == 'transect_direct':
@@ -1167,6 +1674,82 @@ class TerrainTransectPlotter(BasePlotter):
                     'masks': masks,
                     'needs_kelvin_conversion': needs_conversion
                 }
+
+            elif extraction_method == 'terrain_following':
+                # TERRAIN-FOLLOWING METHOD: Fill from lowest vertical level upwards
+                # Iterates through z-levels, using first valid data encountered
+                msg = f"\n=== Using TERRAIN-FOLLOWING extraction for {scenario['label']} ==="
+                print(msg)
+                self.logger.info(msg)
+
+                # Get terrain-following specific settings
+                tf_settings = settings.get('terrain_following', {})
+                output_mode = tf_settings.get('output_mode', '2d')
+                buildings_mask = tf_settings.get('buildings_mask', True)
+
+                msg = f"  Output mode: {output_mode}, Buildings mask: {buildings_mask}"
+                print(msg)
+                self.logger.info(msg)
+
+                if output_mode == '1d':
+                    # 1D transect output (more memory efficient)
+                    transect_values, coordinates, var_name, needs_conversion = \
+                        self._extract_terrain_following(
+                            dataset, static_dataset, domain, buildings_mask, '1d',
+                            transect_axis, transect_location, transect_width, settings
+                        )
+
+                    # Get building/LAD masks if static data available
+                    masks = None
+                    if static_dataset is not None:
+                        masks = self._get_building_lad_masks(
+                            static_dataset, transect_axis, transect_location,
+                            transect_width, domain
+                        )
+
+                    return {
+                        'transect_values': transect_values,
+                        'coordinates': coordinates,
+                        'xy_slice': None,  # No 2D context with 1D mode
+                        'label': scenario['label'],
+                        'color': scenario['color'],
+                        'linestyle': scenario.get('linestyle', '-'),
+                        'linewidth': scenario.get('linewidth', 2.0),
+                        'masks': masks,
+                        'needs_kelvin_conversion': needs_conversion
+                    }
+                else:  # '2d' mode
+                    # 2D full field output (provides spatial context)
+                    slice_2d, var_name, needs_conversion = \
+                        self._extract_terrain_following(
+                            dataset, static_dataset, domain, buildings_mask, '2d',
+                            settings=settings
+                        )
+
+                    # Extract transect from 2D field (using existing function)
+                    transect_values, coordinates = self._extract_transect_line(
+                        slice_2d, transect_axis, transect_location, transect_width
+                    )
+
+                    # Get building/LAD masks if static data available
+                    masks = None
+                    if static_dataset is not None:
+                        masks = self._get_building_lad_masks(
+                            static_dataset, transect_axis, transect_location,
+                            transect_width, domain
+                        )
+
+                    return {
+                        'transect_values': transect_values,
+                        'coordinates': coordinates,
+                        'xy_slice': slice_2d,  # 2D context available
+                        'label': scenario['label'],
+                        'color': scenario['color'],
+                        'linestyle': scenario.get('linestyle', '-'),
+                        'linewidth': scenario.get('linewidth', 2.0),
+                        'masks': masks,
+                        'needs_kelvin_conversion': needs_conversion
+                    }
 
             else:  # extraction_method == 'slice_2d' (default)
                 # SLICE METHOD: Extract full 2D slice, then extract transect
@@ -1457,9 +2040,22 @@ class TerrainTransectPlotter(BasePlotter):
                     aspect='equal'
                 )
 
-                # Add transect line
-                transect_axis = settings['transect_axis']
-                transect_location = settings['transect_location']
+                # Add transect line - handle domain-specific settings for terrain_following
+                # Check if we're using terrain_following with domain-specific settings
+                extraction_method = settings.get('extraction_method', 'slice_2d')
+                if extraction_method == 'terrain_following':
+                    tf_settings = settings.get('terrain_following', {})
+                    domain_settings = tf_settings.get(domain, {})
+
+                    # Use domain-specific if available, else fall back to global settings
+                    transect_axis = domain_settings.get('transect_axis',
+                                                       settings.get('transect_axis', 'x'))
+                    transect_location = domain_settings.get('transect_location',
+                                                           settings.get('transect_location', 100))
+                else:
+                    # For other methods, use global settings
+                    transect_axis = settings.get('transect_axis', 'x')
+                    transect_location = settings.get('transect_location', 100)
 
                 if transect_axis == 'x':
                     # Horizontal line at constant y
