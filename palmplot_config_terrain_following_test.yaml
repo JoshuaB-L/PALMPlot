@@ -21,8 +21,8 @@ data:
   lad_wad_data_path: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/input/output_single_tree_2m/LAD_WAD_grid_data_2m_gridv2_002_with_wad.csv"
 
   # Scenarios to load - must include all scenarios used in plot settings below
-  spacings: [10, 15, 20, 25]    # All spacing scenarios
-  ages: [20, 40, 60, 80]        # All age scenarios
+  spacings: [10, 15]    # Reduced for testing
+  ages: [20, 40]        # Reduced for testing
 
   # Domain settings
   domains:
@@ -121,12 +121,24 @@ plots:
           output_mode: "2d"  # Use 2D to get map visualization in bottom panel
 
           # Building mask: true = exclude buildings (leave as NaN), false = fill through buildings
-          buildings_mask: true  # Test with building mask ON first
+          buildings_mask: false  # Test with building mask ON first
 
           # Global defaults for vertical iteration
           # These apply to both parent and child domains unless overridden below
           start_z_index: 0  # Start from absolute lowest level (zu_3d[0])
           max_z_index: 10   # Default max level (can be overridden per domain)
+
+          # Optional: Vertical offset for transect extraction
+          # After terrain-following finds the lowest valid level at each cell,
+          # offset by this many grid points in the vertical z-axis
+          # Examples:
+          #   transect_z_offset: null  → Disabled (use terrain-following values directly)
+          #   transect_z_offset: 0     → Same as null (disabled)
+          #   transect_z_offset: 1     → Extract 1 level above terrain-following base
+          #   transect_z_offset: 5     → Extract 5 levels above terrain-following base
+          #   transect_z_offset: -1    → Extract 1 level below (if available)
+          # Useful for analyzing conditions at a fixed height above variable terrain
+          transect_z_offset: null  # Disabled by default
 
           # Global defaults for transect settings
           # These apply to both parent and child domains unless overridden below
@@ -143,6 +155,8 @@ plots:
             transect_axis: "x"   # Can override transect axis per domain
             transect_location: 200  # Can override transect location per domain
             transect_width: 0    # Can override averaging width per domain
+            transect_z_offset: 1  # Example: Extract 2 levels above terrain base
+                                    # (e.g., if base is zu_3d[1]=5m, extract zu_3d[3]=25m)
 
           # Child domain (2m resolution, 200×200m)
           child:
@@ -151,6 +165,8 @@ plots:
             transect_axis: "x"   # Same as parent, but can be different
             transect_location: 100  # Middle of child domain
             transect_width: 0    # No averaging
+            transect_z_offset: 5  # TEST: Extract 3 levels above terrain base
+                                    # (e.g., if base is zu_3d[11]=21m, extract zu_3d[14]=26m)
 
         # Time selection method
         # Options: 'mean', 'mean_timeframe', 'single_timestep'
@@ -163,11 +179,11 @@ plots:
 
         # Scenario comparisons
         age_comparison:
-          constant_spacing: [10, 15, 20, 25]              # meters
-          varying_ages: [20, 40, 60, 80]              # years (reduced for testing)
+          constant_spacing: [10]              # meters
+          varying_ages: [20, 40]              # years (reduced for testing)
         spacing_comparison:
-          constant_age: [20, 40, 60, 80]              # years (reduced for testing)
-          varying_spacings: [10, 15, 20, 25]          # meters (reduced for testing)
+          constant_age: [20]              # years (reduced for testing)
+          varying_spacings: [10, 15]          # meters (reduced for testing)
 
         # Color schemes and axis ranges
         temperature_cmap: "RdBu_r"

@@ -245,6 +245,21 @@ class ConfigHandler:
                     f"start_z_index ({start_z_index})"
                 )
 
+        # Validate global transect_z_offset (optional)
+        transect_z_offset = tf_settings.get('transect_z_offset', None)
+        if transect_z_offset is not None:
+            if not isinstance(transect_z_offset, int):
+                raise ValueError(
+                    f"{item_id}: terrain_following.transect_z_offset must be integer or null, "
+                    f"got {type(transect_z_offset).__name__}"
+                )
+            # Allow both positive and negative offsets, but warn if very large
+            if abs(transect_z_offset) > 100:
+                self.logger.warning(
+                    f"{item_id}: terrain_following.transect_z_offset is very large "
+                    f"({transect_z_offset}). This may result in out-of-bounds errors."
+                )
+
         # Validate domain-specific settings if present
         for domain in ['parent', 'child']:
             if domain not in tf_settings:
@@ -308,6 +323,22 @@ class ConfigHandler:
                         f"{item_id}: terrain_following.{domain}.transect_width must be "
                         f"non-negative integer, got {domain_width}"
                     )
+
+            # Validate domain-specific transect_z_offset
+            if 'transect_z_offset' in domain_settings:
+                domain_z_offset = domain_settings['transect_z_offset']
+                if domain_z_offset is not None:
+                    if not isinstance(domain_z_offset, int):
+                        raise ValueError(
+                            f"{item_id}: terrain_following.{domain}.transect_z_offset must be "
+                            f"integer or null, got {type(domain_z_offset).__name__}"
+                        )
+                    # Allow both positive and negative offsets, but warn if very large
+                    if abs(domain_z_offset) > 100:
+                        self.logger.warning(
+                            f"{item_id}: terrain_following.{domain}.transect_z_offset is very large "
+                            f"({domain_z_offset}). This may result in out-of-bounds errors."
+                        )
 
             self.logger.debug(
                 f"{item_id}: Domain-specific terrain-following settings validated for '{domain}'"

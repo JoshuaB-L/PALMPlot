@@ -911,6 +911,10 @@ class TerrainTransectPlotter(BasePlotter):
             max_z_index = domain_settings.get('max_z_index',
                                              tf_settings.get('max_z_index', None))
 
+            # Get transect_z_offset: domain-specific > global > default (None/disabled)
+            transect_z_offset = domain_settings.get('transect_z_offset',
+                                                    tf_settings.get('transect_z_offset', None))
+
             # Log which settings source was used
             if domain_type in tf_settings:
                 self.logger.debug(f"Using domain-specific terrain_following settings for '{domain_type}'")
@@ -1177,6 +1181,110 @@ class TerrainTransectPlotter(BasePlotter):
                       f"mean=zu_3d[{int(mean_source)}] ({z_coords[int(mean_source)]:.2f}m)"
                 print(msg)
                 self.logger.info(msg)
+
+            # STEP 3.5: APPLY VERTICAL OFFSET (if transect_z_offset is specified)
+            if transect_z_offset is not None and transect_z_offset != 0:
+                msg = f"\n=== APPLYING VERTICAL OFFSET ==="
+                print(msg)
+                self.logger.info(msg)
+
+                msg = f"  Offset: {transect_z_offset} grid points {'upward' if transect_z_offset > 0 else 'downward'}"
+                print(msg)
+                self.logger.info(msg)
+
+                # VECTORIZED IMPLEMENTATION (much faster than nested loops)
+
+                # Get mask of cells with valid source levels
+                valid_source_mask = source_level_array >= 0
+                n_valid_sources = np.sum(valid_source_mask)
+
+                # Calculate target z-levels for all cells (vectorized)
+                target_z_array = source_level_array + transect_z_offset
+
+                # Check which target levels are within bounds (vectorized)
+                in_bounds_mask = (target_z_array >= 0) & (target_z_array < n_z_levels) & valid_source_mask
+                n_offset_out_of_bounds = n_valid_sources - np.sum(in_bounds_mask)
+
+                # Convert xarray to numpy for fast indexing (shape: [n_z_levels, ny, nx])
+                full_data_array = var_data_time_avg.values
+
+                # Create meshgrid for y, x indices
+                y_indices, x_indices = np.meshgrid(np.arange(ny), np.arange(nx), indexing='ij')
+
+                # Initialize offset array with NaN
+                offset_array = np.full((ny, nx), np.nan, dtype=np.float64)
+
+                # For in-bounds cells, extract values using advanced indexing
+                if np.any(in_bounds_mask):
+                    # Get target z-levels for in-bounds cells (convert to int for indexing)
+                    target_zs = target_z_array[in_bounds_mask].astype(int)
+                    y_coords = y_indices[in_bounds_mask]
+                    x_coords = x_indices[in_bounds_mask]
+
+                    # Extract values: full_data_array[z, y, x] (vectorized!)
+                    extracted_values = full_data_array[target_zs, y_coords, x_coords]
+
+                    # Check for fill values (vectorized)
+                    if np.isnan(fill_value):
+                        valid_value_mask = ~np.isnan(extracted_values)
+                    else:
+                        valid_value_mask = ~(np.isclose(extracted_values, fill_value, rtol=1e-9, atol=1e-9) |
+                                           (extracted_values == fill_value))
+
+                    # Create temporary array for assignments
+                    temp_values = np.full(np.sum(in_bounds_mask), np.nan)
+                    temp_values[valid_value_mask] = extracted_values[valid_value_mask]
+
+                    # Assign back to offset_array (vectorized)
+                    offset_array[in_bounds_mask] = temp_values
+
+                # Statistics
+                n_offset_applied = np.sum(~np.isnan(offset_array))
+                n_offset_fill_value = np.sum(in_bounds_mask) - n_offset_applied
+
+                msg = f"  Offset results:"
+                print(msg)
+                self.logger.info(msg)
+
+                msg = f"    - Successfully offset: {n_offset_applied}/{n_valid_sources} cells"
+                print(msg)
+                self.logger.info(msg)
+
+                if n_offset_out_of_bounds > 0:
+                    msg = f"    - Out of bounds: {n_offset_out_of_bounds} cells (target z-level outside dataset)"
+                    print(msg)
+                    self.logger.warning(msg)
+
+                if n_offset_fill_value > 0:
+                    msg = f"    - Fill values: {n_offset_fill_value} cells (target contained fill value)"
+                    print(msg)
+                    self.logger.warning(msg)
+
+                # Log offset level statistics
+                valid_offset_sources = source_level_array[~np.isnan(offset_array)]
+                if len(valid_offset_sources) > 0:
+                    offset_target_levels = valid_offset_sources + transect_z_offset
+                    min_target = np.min(offset_target_levels)
+                    max_target = np.max(offset_target_levels)
+                    mean_target = np.mean(offset_target_levels)
+
+                    msg = f"  Target levels after offset: min=zu_3d[{int(min_target)}] ({z_coords[int(min_target)]:.2f}m), " \
+                          f"max=zu_3d[{int(max_target)}] ({z_coords[int(max_target)]:.2f}m), " \
+                          f"mean=zu_3d[{int(mean_target)}] ({z_coords[int(mean_target)]:.2f}m)"
+                    print(msg)
+                    self.logger.info(msg)
+
+                # Replace filled_array with offset_array for downstream use
+                filled_array = offset_array
+                n_filled_final = np.sum(~np.isnan(filled_array))
+
+                msg = f"  Final coverage after offset: {n_filled_final}/{ny*nx} cells ({100*n_filled_final/(ny*nx):.1f}%)"
+                print(msg)
+                self.logger.info(msg)
+
+                if n_filled_final == 0:
+                    self.logger.error("No valid data after applying vertical offset!")
+                    raise ValueError("Vertical offset produced all NaN - try reducing offset or adjusting max_z_index")
 
             # STEP 4: GENERATE OUTPUT BASED ON OUTPUT_MODE
             valid_data = filled_array[~np.isnan(filled_array)]
