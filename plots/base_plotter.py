@@ -72,7 +72,12 @@ class BasePlotter(ABC):
         # Grid settings
         plt.rcParams['axes.grid'] = self.config['plots']['global_settings']['grid']
         plt.rcParams['grid.alpha'] = self.config['plots']['global_settings']['grid_alpha']
-        
+
+        # SVG output settings - prevent text stacking issue
+        # Set svg.fonttype to 'none' to embed fonts as text objects (not paths)
+        # This ensures proper text rendering and editability in SVG output
+        plt.rcParams['svg.fonttype'] = 'none'
+
         # Suppress font warnings
         warnings.filterwarnings('ignore', message='findfont: Font family')
         

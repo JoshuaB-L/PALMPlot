@@ -3485,6 +3485,11 @@ class TerrainTransectPlotter(BasePlotter):
                 ax_map.set_ylabel('Y Axis (m)')
                 ax_map.set_aspect('equal')  # Ensure square aspect ratio for 2D slice
 
+                # Explicitly set limits to match extent (ensures full width is shown)
+                # Without this, aspect='equal' may shrink the axes to fit the allocated space
+                ax_map.set_xlim(extent_x_min, extent_x_max)
+                ax_map.set_ylim(extent_y_min, extent_y_max)
+
         # Apply tight_layout first, then add colorbar to avoid layout conflicts
         plt.tight_layout()
 
