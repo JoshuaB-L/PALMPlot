@@ -414,6 +414,8 @@ plots:
             transect_axis: "x"   # Same as parent, but can be different
             transect_location: 100  # Middle of child domain
             transect_width: 0    # No averaging
+            transect_visualization_width: 20  # Crop 2D slice to ±20 grid cells around transect line
+                                               # Set to null or omit for no cropping (full domain)
             transect_z_offset: 5  # TEST: Extract 3 levels above terrain base
                                     # (e.g., if base is zu_3d[11]=21m, extract zu_3d[14]=26m)
 

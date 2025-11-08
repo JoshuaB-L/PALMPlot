@@ -3359,23 +3359,7 @@ class TerrainTransectPlotter(BasePlotter):
                     self.logger.info(f"XY map: No conversion, "
                                    f"value range [{np.nanmin(xy_slice_plot):.2f}, {np.nanmax(xy_slice_plot):.2f}]")
 
-                # Plot as colored map
-                extent_x = xy_slice.shape[1] * resolution
-                extent_y = xy_slice.shape[0] * resolution
-                self.logger.info(f"XY map extent: x=[0, {extent_x}], y=[0, {extent_y}], shape={xy_slice.shape}")
-
-                im = ax_map.imshow(
-                    xy_slice_plot,
-                    cmap=cmap,
-                    vmin=var_range[0],
-                    vmax=var_range[1],
-                    origin='lower',
-                    extent=[0, extent_x, 0, extent_y],
-                    aspect='equal'
-                )
-
-                # Add transect line - handle domain-specific settings for terrain_following
-                # Check if we're using terrain_following with domain-specific settings
+                # Get transect settings for cropping and line display
                 extraction_method = settings.get('extraction_method', 'slice_2d')
                 if extraction_method == 'terrain_following':
                     tf_settings = settings.get('terrain_following', {})
@@ -3386,11 +3370,95 @@ class TerrainTransectPlotter(BasePlotter):
                                                        settings.get('transect_axis', 'x'))
                     transect_location = domain_settings.get('transect_location',
                                                            settings.get('transect_location', 100))
+                    transect_visualization_width = domain_settings.get('transect_visualization_width',
+                                                                       settings.get('transect_visualization_width', None))
                 else:
                     # For other methods, use global settings
                     transect_axis = settings.get('transect_axis', 'x')
                     transect_location = settings.get('transect_location', 100)
+                    transect_visualization_width = settings.get('transect_visualization_width', None)
 
+                # Get the coordinates for the line plot to match x-axis extent
+                if len(scenarios_data) > 0:
+                    coordinates = scenarios_data[0]['coordinates']
+                    x_coords_line = coordinates * resolution
+                    x_extent_min = x_coords_line.min()
+                    x_extent_max = x_coords_line.max()
+                else:
+                    x_extent_min = 0
+                    x_extent_max = xy_slice.shape[1] * resolution
+
+                # Apply transect visualization width cropping if specified
+                if transect_visualization_width is not None:
+                    self.logger.info(f"Applying transect visualization width cropping: ±{transect_visualization_width} cells")
+
+                    if transect_axis == 'x':
+                        # Transect runs along x-axis, crop in y-direction
+                        ny, nx = xy_slice_plot.shape
+                        y_min = max(0, transect_location - transect_visualization_width)
+                        y_max = min(ny, transect_location + transect_visualization_width + 1)
+
+                        # Crop the 2D slice
+                        xy_slice_plot = xy_slice_plot[y_min:y_max, :]
+
+                        # Calculate cropped extent
+                        extent_x_min = x_extent_min  # Match line plot
+                        extent_x_max = x_extent_max  # Match line plot
+                        extent_y_min = y_min * resolution
+                        extent_y_max = y_max * resolution
+
+                        self.logger.info(f"Cropped 2D slice: y=[{y_min}:{y_max}], "
+                                       f"physical extent: x=[{extent_x_min:.1f}, {extent_x_max:.1f}], "
+                                       f"y=[{extent_y_min:.1f}, {extent_y_max:.1f}]")
+
+                    else:  # transect_axis == 'y'
+                        # Transect runs along y-axis, crop in x-direction
+                        ny, nx = xy_slice_plot.shape
+                        x_min = max(0, transect_location - transect_visualization_width)
+                        x_max = min(nx, transect_location + transect_visualization_width + 1)
+
+                        # Crop the 2D slice
+                        xy_slice_plot = xy_slice_plot[:, x_min:x_max]
+
+                        # Calculate cropped extent
+                        extent_x_min = x_min * resolution
+                        extent_x_max = x_max * resolution
+                        extent_y_min = x_extent_min  # Match line plot (transect along y)
+                        extent_y_max = x_extent_max  # Match line plot
+
+                        self.logger.info(f"Cropped 2D slice: x=[{x_min}:{x_max}], "
+                                       f"physical extent: x=[{extent_x_min:.1f}, {extent_x_max:.1f}], "
+                                       f"y=[{extent_y_min:.1f}, {extent_y_max:.1f}]")
+                else:
+                    # No cropping - use full domain extent, but match x-axis to line plot
+                    extent_y_full = xy_slice.shape[0] * resolution
+
+                    if transect_axis == 'x':
+                        extent_x_min = x_extent_min  # Match line plot
+                        extent_x_max = x_extent_max  # Match line plot
+                        extent_y_min = 0
+                        extent_y_max = extent_y_full
+                    else:  # transect_axis == 'y'
+                        extent_x_min = 0
+                        extent_x_max = xy_slice.shape[1] * resolution
+                        extent_y_min = x_extent_min  # Match line plot
+                        extent_y_max = x_extent_max  # Match line plot
+
+                    self.logger.info(f"No cropping - full domain, extent: x=[{extent_x_min:.1f}, {extent_x_max:.1f}], "
+                                   f"y=[{extent_y_min:.1f}, {extent_y_max:.1f}]")
+
+                # Plot the 2D slice with calculated extent
+                im = ax_map.imshow(
+                    xy_slice_plot,
+                    cmap=cmap,
+                    vmin=var_range[0],
+                    vmax=var_range[1],
+                    origin='lower',
+                    extent=[extent_x_min, extent_x_max, extent_y_min, extent_y_max],
+                    aspect='auto'  # Allow non-square pixels to match line plot width
+                )
+
+                # Add transect line
                 if transect_axis == 'x':
                     # Horizontal line at constant y
                     y_pos = transect_location * resolution
@@ -3415,8 +3483,40 @@ class TerrainTransectPlotter(BasePlotter):
                 # Format bottom panel
                 ax_map.set_xlabel('X Axis (m)')
                 ax_map.set_ylabel('Y Axis (m)')
-                ax_map.set_aspect('equal')
+                ax_map.set_aspect('equal')  # Ensure square aspect ratio for 2D slice
 
+        # Apply tight_layout first, then add colorbar to avoid layout conflicts
         plt.tight_layout()
+
+        # Add horizontal colorbar after tight_layout (only if 2D map exists)
+        if ax_map is not None and len(scenarios_data) > 0:
+            xy_slice = scenarios_data[0]['xy_slice']
+            if xy_slice is not None:
+                # Add horizontal colorbar below the x-axis that spans full width
+                # Use manual positioning to avoid distorting the 2D slice aspect ratio
+
+                # Get current position of ax_map (after tight_layout)
+                pos = ax_map.get_position()
+
+                # Create colorbar axes below ax_map with same width
+                # Position: [left, bottom, width, height]
+                cbar_height = 0.03  # Height of colorbar (in figure fraction)
+                cbar_pad = 0.12     # Padding between x-axis label and colorbar
+
+                cax = fig.add_axes([
+                    pos.x0,                    # Same left edge as ax_map
+                    pos.y0 - cbar_pad - cbar_height,  # Below ax_map with padding
+                    pos.width,                 # Same width as ax_map
+                    cbar_height                # Fixed height
+                ])
+
+                # Get the image object (im) from ax_map
+                im = ax_map.get_images()[0]  # Get the imshow object
+
+                cbar = plt.colorbar(im, cax=cax, orientation='horizontal')
+                cbar.set_label(var_label, fontsize=10)
+                cbar.ax.tick_params(labelsize=9)
+
+                self.logger.info(f"Added horizontal colorbar below x-axis (height={cbar_height}, pad={cbar_pad})")
 
         return fig
