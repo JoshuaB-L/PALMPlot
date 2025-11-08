@@ -167,31 +167,39 @@ class PALMPlot:
             # Create output directory for this item
             item_dir = self.output_manager.create_slide_directory(item_id)
 
-            # Generate plots based on configuration
-            for plot_type, plot_enabled in item_config['plot_types'].items():
-                if plot_enabled:
-                    self.logger.info(f"  Generating {plot_type} for {item_id}")
+            # Generate plots - support both new dynamic and legacy formats
+            # Check if using new dynamic format (no plot_types in config)
+            if 'plot_types' in item_config:
+                # Legacy format: iterate through plot_types dict
+                plot_types_to_generate = [pt for pt, enabled in item_config['plot_types'].items() if enabled]
+            else:
+                # New dynamic format: use plotter's available_plots() method
+                plot_types_to_generate = plotter.available_plots()
+                self.logger.info(f"  Using dynamic plot generation: {len(plot_types_to_generate)} plots")
 
-                    # Generate plot
-                    fig = plotter.generate_plot(plot_type, data)
+            for plot_type in plot_types_to_generate:
+                self.logger.info(f"  Generating {plot_type} for {item_id}")
 
-                    # Get subfigure letter once per plot_type (outside format loop)
-                    # This ensures all formats of the same plot get the same letter
-                    if self.use_figures:
-                        figure_id = self.output_manager.get_figure_id_from_slide(item_id)
-                        subfigure_letter = self.output_manager.figure_mapper.get_next_subfigure_letter(figure_id)
-                    else:
-                        subfigure_letter = None
+                # Generate plot
+                fig = plotter.generate_plot(plot_type, data)
 
-                    # Save in requested formats (using same letter for all formats)
-                    for fmt in self.config['output']['formats']:
-                        output_path = self.output_manager.save_figure(
-                            fig, item_id, plot_type, fmt, subfigure_letter=subfigure_letter
-                        )
-                        self.logger.info(f"    Saved: {output_path}")
+                # Get subfigure letter once per plot_type (outside format loop)
+                # This ensures all formats of the same plot get the same letter
+                if self.use_figures:
+                    figure_id = self.output_manager.get_figure_id_from_slide(item_id)
+                    subfigure_letter = self.output_manager.figure_mapper.get_next_subfigure_letter(figure_id)
+                else:
+                    subfigure_letter = None
 
-                    # Close figure to free memory
-                    plotter.close_figure(fig)
+                # Save in requested formats (using same letter for all formats)
+                for fmt in self.config['output']['formats']:
+                    output_path = self.output_manager.save_figure(
+                        fig, item_id, plot_type, fmt, subfigure_letter=subfigure_letter
+                    )
+                    self.logger.info(f"    Saved: {output_path}")
+
+                # Close figure to free memory
+                plotter.close_figure(fig)
 
         except Exception as e:
             self.logger.error(f"Error processing {item_id}: {str(e)}")

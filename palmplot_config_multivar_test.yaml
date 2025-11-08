@@ -1,5 +1,6 @@
-# PALMPlot Test Configuration for Terrain-Following Extraction
-# Tests the new terrain-following method that fills from lowest vertical level upwards
+# PALMPlot Configuration - Multi-Variable Support Test
+# Created: 2025-11-07
+# Purpose: Test Phases 6-8 with XY variable fixes and multi-variable caching
 
 # General Settings
 general:
@@ -9,7 +10,9 @@ general:
   parallel_processing: false
   n_workers: 4
 
-# Data Paths
+# ============================================================
+# DATA CONFIGURATION
+# ============================================================
 data:
   # Base paths
   simulation_base_path: "/mnt/f/phd/thf_forest_study/thf_forest_lad_cases_000"
@@ -92,7 +95,7 @@ data:
       units_out: "%"
       conversion: "none"
       colormap: "BuGn"
-      value_range: [0, 100]
+      value_range: "auto"
       label: "Relative Humidity"
       terrain_following: true
 
@@ -168,7 +171,7 @@ data:
       units_out: "degC"
       conversion: "none"
       colormap: "RdYlBu_r"
-      value_range: [10, 40]
+      value_range: "auto"
       label: "UTCI"
       terrain_following: false  # Surface variable
 
@@ -185,6 +188,7 @@ data:
       label: "PET"
       terrain_following: false
 
+    # Net radiation (2D surface variable)
     radiation_net:
       palm_name: "rad_net*_xy"
       file_type: "av_xy"
@@ -341,8 +345,8 @@ plots:
       # ===== PLOT MATRIX CONFIGURATION =====
       # Define which domain and comparison combinations to generate
       plot_matrix:
-        domains: ["parent", "child"]
-        comparisons: ["age", "spacing"]
+        domains: ["child"]
+        comparisons: ["age"]
 
       # ===== PER-VARIABLE OVERRIDES =====
       # Optionally restrict specific variables to certain domains or comparisons
@@ -351,18 +355,18 @@ plots:
           domains: ["child"]  # UTCI only for child domain (2m resolution)
           comparisons: ["age"]  # Only age comparison for UTCI
 
-        radiation_net:
-          comparisons: ["age"]  # Only age comparison for radiation
+#        radiation_net:
+#          comparisons: ["age"]  # Only age comparison for radiation
+#
+#        relative_humidity:
+#          domains: ["parent"]  # Test humidity only on parent domain
 
-        relative_humidity:
-          domains: ["parent"]  # Test humidity only on parent domain
+      # ===== SETTINGS =====
       settings:
         # ===== EXTRACTION METHOD =====
-        # NEW: Use 'terrain_following' method
         extraction_method: "terrain_following"
 
         # ===== TERRAIN-FOLLOWING SETTINGS =====
-        # (Only used when extraction_method == 'terrain_following')
         terrain_following:
           # ===== GLOBAL SETTINGS (apply to both domains unless overridden) =====
 
@@ -393,18 +397,14 @@ plots:
           # These apply to both parent and child domains unless overridden below
           # (Can be omitted here if specified in main settings block above)
 
-          # ===== DOMAIN-SPECIFIC OVERRIDES =====
-          # You can override any setting independently for parent or child domains
-          # Settings hierarchy: domain-specific > global > main settings
-
-          # Parent domain (10m resolution, 400×400m)
-          parent:
-            start_z_index: 0     # Start from zu_3d[0] (~0m)
-            max_z_index: 10      # Stop at zu_3d[10] (~95m for parent)
-            transect_axis: "x"   # Can override transect axis per domain
-            transect_location: 200  # Can override transect location per domain
-            transect_width: 0    # Can override averaging width per domain
-            transect_z_offset: 1  # Example: Extract 2 levels above terrain base
+#          # ===== DOMAIN-SPECIFIC OVERRIDES =====
+#          parent:
+#            start_z_index: 0     # Start from zu_3d[0] (~0m)
+#            max_z_index: 10      # Stop at zu_3d[10] (~95m for parent)
+#            transect_axis: "x"   # Can override transect axis per domain
+#            transect_location: 200  # Can override transect location per domain
+#            transect_width: 0    # Can override averaging width per domain
+#            transect_z_offset: 1  # Example: Extract 2 levels above terrain base
                                     # (e.g., if base is zu_3d[1]=5m, extract zu_3d[3]=25m)
 
           # Child domain (2m resolution, 200×200m)
@@ -444,26 +444,28 @@ plots:
 
               # Which offset levels to compute and save
               # Options:
-              #   - List of integers: [0, 1, 5, 10] for specific offsets
-              #   - String "all": Save all levels from 0 to max_levels
+              #   - List of integers: [1, 2, 5, 10]
               #   - String "range(start, end)": Python range notation
               # NOTE: More levels = larger files but more flexibility
-              offsets: [1, 2, 5]  # Common offsets for testing
+              offsets: [0]  # Common offsets for testing
 
-            # Per-domain variable control for caching
+            # ===== PER-DOMAIN VARIABLE CONTROL (NEW) =====
             # Specify which variables to cache for each domain independently
             # This allows parent and child domains to cache different variable sets
             parent:
               # Variables to cache for parent domain (3D atmospheric variables only)
               # Options:
               #   - "auto": Cache all 3D variables enabled in plots for parent domain
-              #   - List: ["temperature", "relative_humidity"] for specific variables
+              #   - List: ["temperature", "relative_humidity", "humidity_q"] for specific variables
               # NOTE: Only variables with terrain_following: true are cached
               # NOTE: XY surface variables (file_type: av_xy) are NOT cached
-              variables: "auto"
+              variables: #["temperature", "relative_humidity", "humidity_q"]
 
             child:
               # Variables to cache for child domain (3D atmospheric variables only)
+              # Options:
+              #   - "auto": Cache all 3D variables enabled in plots for child domain
+              #   - List: ["temperature"] for specific variables
               variables: "auto"
 
             # NetCDF compression settings
@@ -488,6 +490,56 @@ plots:
               # - 'recompute': Fall back to computing mask (recommended)
               on_mismatch: "recompute"
 
+          # ===== SURFACE DATA CACHING SETTINGS (NEW FEATURE) =====
+          # Save/load time-averaged surface data (av_xy variables) to NetCDF files
+          # This caches 2D surface variables (UTCI, radiation, etc.) separately from 3D masks
+          surface_data_cache:
+            # Enable/disable surface data caching system
+            enabled: true  # Set to true to enable caching
+
+            # Operation mode: 'save', 'load', 'update', or 'disabled'
+            # - 'save': Always compute and save surface data (overwrites existing)
+            # - 'load': Load from files only, skip extraction if not in cache
+            # - 'update': Load if exists, compute missing variables and add to cache
+            # - 'disabled': No caching
+            mode: "save"  # Use 'update' for incremental caching
+
+            # Directory for cached surface data files
+            cache_directory: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/cache/surface_data"
+
+            # NetCDF compression settings
+            compression:
+              enabled: true
+              level: 4  # 1-9: higher = more compression, slower I/O
+
+            # Validation settings for loaded surface data
+            validation:
+              check_grid_size: true      # Verify nx, ny match
+              check_domain_type: true    # Verify parent/child matches
+
+              # Warn if surface data file is older than this (days)
+              max_age_days: 30
+
+              # Action when validation fails:
+              # - 'error': Raise error and stop execution
+              # - 'warn': Log warning and continue with cached data
+              # - 'recompute': Fall back to extracting surface data (recommended)
+              on_mismatch: "recompute"
+
+            # ===== PER-DOMAIN VARIABLE CONTROL =====
+            # Specify which av_xy variables to cache for each domain
+            parent:
+              # Variables to cache for parent domain (2D surface variables only)
+              # Options:
+              #   - "auto": Cache all av_xy variables enabled in plots for parent domain
+              #   - List: ["utci", "radiation_net"] for specific variables
+              # NOTE: Only variables with file_type: av_xy are cached here
+              variables: "auto"
+
+            child:
+              # Variables to cache for child domain (2D surface variables only)
+              variables: "auto"
+
         # Time selection method
         # Options: 'mean', 'mean_timeframe', 'single_timestep'
         time_selection_method: "mean"  # Average over all time steps
@@ -501,9 +553,9 @@ plots:
         age_comparison:
           constant_spacing: [10]              # meters
           varying_ages: [20]              # years (reduced for testing)
-        spacing_comparison:
-          constant_age: [20]              # years (reduced for testing)
-          varying_spacings: [10]          # meters (reduced for testing)
+#        spacing_comparison:
+#          constant_age: [20]              # years (reduced for testing)
+#          varying_spacings: [10]          # meters (reduced for testing)
 
         # Color schemes and axis ranges
         temperature_cmap: "RdBu_r"
@@ -546,14 +598,18 @@ logging:
   console_output: true
   log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-# Performance Settings
+# ============================================================
+# PERFORMANCE CONFIGURATION
+# ============================================================
 performance:
   chunk_size: 100
   cache_data: true
   compress_output: false
   multiprocessing: false
 
-# Validation Settings
+# ============================================================
+# VALIDATION CONFIGURATION
+# ============================================================
 validation:
   check_data_completeness: true
   validate_units: true

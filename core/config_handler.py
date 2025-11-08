@@ -55,7 +55,22 @@ class ConfigHandler:
                     }
                 },
                 'file_patterns': dict,
-                'variables': dict
+                # New comprehensive variable definitions
+                'variables': {
+                    str: {  # Variable name (e.g., 'temperature', 'utci')
+                        'palm_name': str,  # PALM variable name (e.g., 'ta', 'bio_utci*_xy')
+                        'file_type': Or('av_3d', 'av_xy'),  # File type
+                        'z_coordinate': str,  # Vertical coordinate (e.g., 'zu_3d', 'zu1_xy')
+                        'units_in': str,  # Input units
+                        'units_out': str,  # Output units
+                        'conversion': str,  # Conversion function name
+                        'colormap': str,  # Matplotlib colormap
+                        'value_range': Or('auto', list),  # [min, max] or 'auto'
+                        'label': str,  # Display label
+                        'terrain_following': bool,  # Use terrain-following extraction?
+                        SchemaOptional('wildcard'): bool  # Is palm_name a wildcard pattern?
+                    }
+                }
             },
             'output': {
                 'base_directory': str,
@@ -133,6 +148,7 @@ class ConfigHandler:
             
         # Additional custom validations
         self._validate_paths()
+        self._validate_variables()
         self._validate_plot_settings()
         
     def _validate_paths(self):
@@ -154,7 +170,68 @@ class ConfigHandler:
         # Create log directory if needed
         log_file = Path(self.config['logging']['log_file'])
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        
+
+    def _validate_variables(self):
+        """Validate variable definitions"""
+        variables = self.config['data']['variables']
+
+        if not variables:
+            raise ValueError("No variables defined in data.variables section")
+
+        # Validate each variable definition
+        for var_name, var_config in variables.items():
+            # Check required fields
+            required_fields = [
+                'palm_name', 'file_type', 'z_coordinate', 'units_in',
+                'units_out', 'conversion', 'colormap', 'value_range',
+                'label', 'terrain_following'
+            ]
+
+            missing_fields = [f for f in required_fields if f not in var_config]
+            if missing_fields:
+                raise ValueError(
+                    f"Variable '{var_name}' missing required fields: {missing_fields}"
+                )
+
+            # Validate file_type
+            if var_config['file_type'] not in ['av_3d', 'av_xy']:
+                raise ValueError(
+                    f"Variable '{var_name}' has invalid file_type: {var_config['file_type']}. "
+                    "Must be 'av_3d' or 'av_xy'"
+                )
+
+            # Validate terrain_following for xy variables
+            if var_config['file_type'] == 'av_xy' and var_config['terrain_following']:
+                self.logger.warning(
+                    f"Variable '{var_name}' is from av_xy file but has terrain_following=true. "
+                    "This is unusual - xy variables are typically surface-only."
+                )
+
+            # Validate conversion function names
+            valid_conversions = [
+                'none', 'kelvin_to_celsius', 'multiply_1000', 'divide_100'
+            ]
+            if var_config['conversion'] not in valid_conversions:
+                self.logger.warning(
+                    f"Variable '{var_name}' uses unknown conversion: {var_config['conversion']}. "
+                    f"Known conversions: {valid_conversions}"
+                )
+
+            # Validate value_range
+            value_range = var_config['value_range']
+            if value_range != 'auto':
+                if not isinstance(value_range, list) or len(value_range) != 2:
+                    raise ValueError(
+                        f"Variable '{var_name}' has invalid value_range. "
+                        "Must be 'auto' or [min, max] list"
+                    )
+                if value_range[0] >= value_range[1]:
+                    raise ValueError(
+                        f"Variable '{var_name}' has invalid value_range: min >= max"
+                    )
+
+        self.logger.info(f"Validated {len(variables)} variable definitions")
+
     def _validate_plot_settings(self):
         """Validate plot-specific settings for both slides and figures"""
         plots_config = self.config['plots']
@@ -173,10 +250,76 @@ class ConfigHandler:
             if not item_config['enabled']:
                 continue
 
-            # Check that at least one plot type is enabled
-            enabled_plots = [p for p, enabled in item_config['plot_types'].items() if enabled]
-            if not enabled_plots:
-                self.logger.warning(f"{item_id} is enabled but no plot types are selected")
+            # Check for old format (plot_types) and reject it
+            if 'plot_types' in item_config:
+                raise ValueError(
+                    f"{item_id}: Old 'plot_types' format is no longer supported. "
+                    f"Please migrate to new format with 'variables', 'plot_matrix', "
+                    f"and optionally 'variable_overrides'. See documentation for details."
+                )
+
+            # Validate new format: variables and plot_matrix
+            if 'variables' not in item_config or 'plot_matrix' not in item_config:
+                raise ValueError(
+                    f"{item_id}: New format requires both 'variables' and 'plot_matrix' sections. "
+                    f"See documentation for migration guide."
+                )
+
+            # Validate variables list
+            variables = item_config['variables']
+            if not variables:
+                raise ValueError(f"{item_id}: 'variables' list cannot be empty")
+
+            # Check that all referenced variables exist in data.variables
+            defined_vars = set(self.config['data']['variables'].keys())
+            for var in variables:
+                if var not in defined_vars:
+                    raise ValueError(
+                        f"{item_id}: Variable '{var}' not found in data.variables. "
+                        f"Available: {sorted(defined_vars)}"
+                    )
+
+            # Validate plot_matrix
+            plot_matrix = item_config['plot_matrix']
+            if 'domains' not in plot_matrix or 'comparisons' not in plot_matrix:
+                raise ValueError(
+                    f"{item_id}: plot_matrix must contain 'domains' and 'comparisons'"
+                )
+
+            valid_domains = ['parent', 'child']
+            for domain in plot_matrix['domains']:
+                if domain not in valid_domains:
+                    raise ValueError(
+                        f"{item_id}: Invalid domain '{domain}'. Must be one of: {valid_domains}"
+                    )
+
+            valid_comparisons = ['age', 'spacing']
+            for comp in plot_matrix['comparisons']:
+                if comp not in valid_comparisons:
+                    raise ValueError(
+                        f"{item_id}: Invalid comparison '{comp}'. Must be one of: {valid_comparisons}"
+                    )
+
+            # Validate variable_overrides if present
+            if 'variable_overrides' in item_config:
+                overrides = item_config['variable_overrides']
+                for var, var_overrides in overrides.items():
+                    if var not in variables:
+                        raise ValueError(
+                            f"{item_id}: variable_overrides references '{var}' "
+                            f"which is not in variables list"
+                        )
+
+                    # Validate override keys
+                    valid_override_keys = ['domains', 'comparisons']
+                    for key in var_overrides:
+                        if key not in valid_override_keys:
+                            raise ValueError(
+                                f"{item_id}: Invalid override key '{key}' for variable '{var}'. "
+                                f"Valid keys: {valid_override_keys}"
+                            )
+
+            self.logger.info(f"{item_id}: Validated {len(variables)} variables")
 
             # Validate terrain-following settings if extraction_method is 'terrain_following'
             if 'settings' in item_config:
@@ -347,6 +490,147 @@ class ConfigHandler:
         self.logger.debug(
             f"{item_id}: Terrain-following settings validated: output_mode={output_mode}, "
             f"buildings_mask={buildings_mask}, start_z={start_z_index}, max_z={max_z_index}"
+        )
+
+        # NEW: Validate mask cache settings if present
+        self._validate_terrain_mask_cache_settings(item_id, tf_settings)
+
+    def _validate_terrain_mask_cache_settings(self, item_id: str, tf_settings: Dict):
+        """
+        Validate terrain mask cache configuration.
+
+        Args:
+            item_id: Figure/slide identifier (for error messages)
+            tf_settings: terrain_following settings dictionary
+        """
+        if 'mask_cache' not in tf_settings:
+            return  # Caching is optional
+
+        cache_settings = tf_settings['mask_cache']
+
+        # Validate enabled flag
+        if not isinstance(cache_settings.get('enabled', True), bool):
+            raise ValueError(f"{item_id}: mask_cache.enabled must be boolean")
+
+        if not cache_settings.get('enabled', True):
+            self.logger.debug(f"{item_id}: Terrain mask caching is disabled")
+            return  # Disabled, skip further validation
+
+        # Validate mode
+        mode = cache_settings.get('mode', 'auto')
+        if mode not in ['save', 'load', 'auto']:
+            raise ValueError(
+                f"{item_id}: mask_cache.mode must be 'save', 'load', or 'auto', "
+                f"got '{mode}'"
+            )
+
+        # Validate cache_directory
+        cache_dir = cache_settings.get('cache_directory')
+        if not cache_dir or not isinstance(cache_dir, str):
+            raise ValueError(
+                f"{item_id}: mask_cache.cache_directory must be a non-empty string"
+            )
+
+        # Validate levels section
+        levels = cache_settings.get('levels', {})
+        if not isinstance(levels, dict):
+            raise ValueError(f"{item_id}: mask_cache.levels must be a dictionary")
+
+        max_levels = levels.get('max_levels', 20)
+        if not isinstance(max_levels, int) or max_levels < 1:
+            raise ValueError(
+                f"{item_id}: mask_cache.levels.max_levels must be positive integer, "
+                f"got {max_levels}"
+            )
+
+        # Validate offsets
+        offsets = levels.get('offsets', [0])
+        if isinstance(offsets, str):
+            if offsets not in ['all'] and not offsets.startswith('range('):
+                raise ValueError(
+                    f"{item_id}: mask_cache.levels.offsets string must be 'all' or "
+                    f"'range(...)', got '{offsets}'"
+                )
+        elif isinstance(offsets, list):
+            if not all(isinstance(o, int) for o in offsets):
+                raise ValueError(
+                    f"{item_id}: mask_cache.levels.offsets list must contain only integers"
+                )
+            if any(o < 0 for o in offsets):
+                raise ValueError(
+                    f"{item_id}: mask_cache.levels.offsets cannot be negative"
+                )
+            if any(o >= max_levels for o in offsets):
+                self.logger.warning(
+                    f"{item_id}: Some offsets in mask_cache.levels.offsets exceed "
+                    f"max_levels ({max_levels}). These may fail at runtime."
+                )
+        else:
+            raise ValueError(
+                f"{item_id}: mask_cache.levels.offsets must be list or string"
+            )
+
+        # Validate variables
+        variables = cache_settings.get('variables', 'auto')
+        if isinstance(variables, str):
+            if variables not in ['auto', 'all']:
+                raise ValueError(
+                    f"{item_id}: mask_cache.variables string must be 'auto' or 'all', "
+                    f"got '{variables}'"
+                )
+        elif not isinstance(variables, list):
+            raise ValueError(
+                f"{item_id}: mask_cache.variables must be string or list"
+            )
+
+        # Validate compression
+        compression = cache_settings.get('compression', {})
+        if not isinstance(compression, dict):
+            raise ValueError(f"{item_id}: mask_cache.compression must be a dictionary")
+
+        if compression.get('enabled', True):
+            if not isinstance(compression.get('enabled'), bool):
+                raise ValueError(f"{item_id}: mask_cache.compression.enabled must be boolean")
+
+            level = compression.get('level', 4)
+            if not isinstance(level, int) or not (1 <= level <= 9):
+                raise ValueError(
+                    f"{item_id}: mask_cache.compression.level must be integer 1-9, "
+                    f"got {level}"
+                )
+
+        # Validate validation settings (meta!)
+        validation = cache_settings.get('validation', {})
+        if not isinstance(validation, dict):
+            raise ValueError(f"{item_id}: mask_cache.validation must be a dictionary")
+
+        on_mismatch = validation.get('on_mismatch', 'recompute')
+        if on_mismatch not in ['error', 'warn', 'recompute']:
+            raise ValueError(
+                f"{item_id}: mask_cache.validation.on_mismatch must be "
+                f"'error', 'warn', or 'recompute', got '{on_mismatch}'"
+            )
+
+        # Validate check flags
+        for check_name in ['check_grid_size', 'check_domain_type', 'check_z_coordinate']:
+            if check_name in validation:
+                if not isinstance(validation[check_name], bool):
+                    raise ValueError(
+                        f"{item_id}: mask_cache.validation.{check_name} must be boolean"
+                    )
+
+        # Validate max_age_days
+        if 'max_age_days' in validation:
+            max_age = validation['max_age_days']
+            if not isinstance(max_age, (int, float)) or max_age <= 0:
+                raise ValueError(
+                    f"{item_id}: mask_cache.validation.max_age_days must be positive number, "
+                    f"got {max_age}"
+                )
+
+        self.logger.debug(
+            f"{item_id}: Terrain mask cache settings validated: "
+            f"mode={mode}, max_levels={max_levels}, offsets={offsets}"
         )
 
     def _expand_paths(self):

@@ -10,8 +10,42 @@ from matplotlib.colors import Normalize
 from typing import Dict, List, Tuple, Optional, Union
 import logging
 import xarray as xr
+from pathlib import Path
 
 from .base_plotter import BasePlotter
+
+# NEW: Import mask caching modules
+try:
+    from ..core.terrain_mask_io import TerrainMaskWriter, TerrainMaskReader
+    from ..core.surface_data_io import (
+        SurfaceDataWriter,
+        SurfaceDataReader,
+        generate_surface_data_filename,
+        find_existing_surface_data_file
+    )
+    from ..utils.netcdf_utils import (
+        generate_mask_filename,
+        find_existing_mask_file,
+        parse_offset_specification,
+        copy_netcdf_metadata
+    )
+    MASK_CACHE_AVAILABLE = True
+    SURFACE_DATA_CACHE_AVAILABLE = True
+except ImportError as e:
+    # Graceful degradation if modules not available
+    MASK_CACHE_AVAILABLE = False
+    SURFACE_DATA_CACHE_AVAILABLE = False
+    import warnings
+    warnings.warn(f"Mask caching modules not available: {e}")
+
+# Import VariableMetadata for multi-variable support
+try:
+    from ..core.variable_metadata import VariableMetadata
+    VARIABLE_METADATA_AVAILABLE = True
+except ImportError as e:
+    VARIABLE_METADATA_AVAILABLE = False
+    import warnings
+    warnings.warn(f"VariableMetadata not available: {e}")
 
 
 class TerrainTransectPlotter(BasePlotter):
@@ -28,25 +62,87 @@ class TerrainTransectPlotter(BasePlotter):
         super().__init__(config, output_manager)
         self.logger = logging.getLogger(__name__)
 
+        # Initialize variable metadata system
+        if VARIABLE_METADATA_AVAILABLE:
+            self.var_metadata = VariableMetadata(config, self.logger)
+            self.logger.info("VariableMetadata system initialized")
+        else:
+            self.var_metadata = None
+            self.logger.warning("VariableMetadata not available, using legacy mode")
+
         # Cache for terrain masks to avoid recomputation
         self._terrain_mask_cache = {}
 
     def available_plots(self) -> List[str]:
-        """Return list of available plot types"""
-        return [
-            "ta_parent_age",
-            "ta_parent_spacing",
-            "ta_child_age",
-            "ta_child_spacing",
-            "qv_parent_age",
-            "qv_parent_spacing",
-            "qv_child_age",
-            "qv_child_spacing"
-        ]
+        """
+        Return list of available plot types.
+
+        Dynamically generates plot types from configuration based on:
+        - variables: List of variables to plot
+        - plot_matrix: domains and comparisons to generate
+        - variable_overrides: Per-variable domain/comparison restrictions
+
+        Returns:
+            List of plot type strings in format: "{variable}_{domain}_{comparison}"
+            e.g., ["temperature_parent_age", "utci_child_age", ...]
+        """
+        # Get full figure configuration (not just settings sub-block)
+        plots_section = self.config['plots'][self._plots_key]
+        fig_config = plots_section.get('fig_6', {})
+
+        # Check if using new format (variables + plot_matrix at fig_6 level)
+        if 'variables' in fig_config and 'plot_matrix' in fig_config:
+            return self._generate_dynamic_plots(fig_config)
+        else:
+            # Fallback to legacy hard-coded list
+            self.logger.warning("Using legacy plot type list. Consider migrating to new format.")
+            return [
+                "ta_parent_age",
+                "ta_parent_spacing",
+                "ta_child_age",
+                "ta_child_spacing",
+                "qv_parent_age",
+                "qv_parent_spacing",
+                "qv_child_age",
+                "qv_child_spacing"
+            ]
+
+    def _generate_dynamic_plots(self, fig_config: Dict) -> List[str]:
+        """
+        Generate plot types dynamically from configuration.
+
+        Args:
+            fig_config: fig_6 configuration dictionary (full, not just settings)
+
+        Returns:
+            List of plot type strings
+        """
+        variables = fig_config.get('variables', [])
+        plot_matrix = fig_config.get('plot_matrix', {})
+        domains = plot_matrix.get('domains', ['parent'])
+        comparisons = plot_matrix.get('comparisons', ['age'])
+        overrides = fig_config.get('variable_overrides', {})
+
+        plots = []
+        for var in variables:
+            # Apply per-variable overrides if they exist
+            var_domains = overrides.get(var, {}).get('domains', domains)
+            var_comps = overrides.get(var, {}).get('comparisons', comparisons)
+
+            # Generate all combinations for this variable
+            for domain in var_domains:
+                for comp in var_comps:
+                    plot_type = f"{var}_{domain}_{comp}"
+                    plots.append(plot_type)
+
+        self.logger.info(f"Generated {len(plots)} dynamic plot types: {plots}")
+        return plots
 
     def generate_plot(self, plot_type: str, data: Dict) -> plt.Figure:
         """
-        Generate specific plot type
+        Generate specific plot type.
+
+        Supports both dynamic format ("temperature_parent_age") and legacy format ("ta_parent_age").
 
         Args:
             plot_type: Type of plot to generate
@@ -55,21 +151,107 @@ class TerrainTransectPlotter(BasePlotter):
         Returns:
             Matplotlib figure
         """
-        plot_method_map = {
-            "ta_parent_age": self._plot_ta_parent_age,
-            "ta_parent_spacing": self._plot_ta_parent_spacing,
-            "ta_child_age": self._plot_ta_child_age,
-            "ta_child_spacing": self._plot_ta_child_spacing,
-            "qv_parent_age": self._plot_qv_parent_age,
-            "qv_parent_spacing": self._plot_qv_parent_spacing,
-            "qv_child_age": self._plot_qv_child_age,
-            "qv_child_spacing": self._plot_qv_child_spacing
-        }
+        settings = self._get_plot_settings('fig_6')
 
-        if plot_type not in plot_method_map:
-            raise ValueError(f"Unknown plot type: {plot_type}")
+        # Try to parse as dynamic plot type: "{variable}_{domain}_{comparison}"
+        parsed = self._parse_plot_type(plot_type)
 
-        return plot_method_map[plot_type](data)
+        if parsed:
+            variable, domain, comparison = parsed
+            self.logger.info(f"Generating dynamic plot: variable={variable}, domain={domain}, comparison={comparison}")
+            return self._create_comparison_plot(data, variable, domain, comparison, settings)
+        else:
+            # Fallback to legacy hard-coded methods
+            self.logger.warning(f"Falling back to legacy plot method for: {plot_type}")
+            plot_method_map = {
+                "ta_parent_age": self._plot_ta_parent_age,
+                "ta_parent_spacing": self._plot_ta_parent_spacing,
+                "ta_child_age": self._plot_ta_child_age,
+                "ta_child_spacing": self._plot_ta_child_spacing,
+                "qv_parent_age": self._plot_qv_parent_age,
+                "qv_parent_spacing": self._plot_qv_parent_spacing,
+                "qv_child_age": self._plot_qv_child_age,
+                "qv_child_spacing": self._plot_qv_child_spacing
+            }
+
+            if plot_type not in plot_method_map:
+                raise ValueError(f"Unknown plot type: {plot_type}")
+
+            return plot_method_map[plot_type](data)
+
+    def _parse_plot_type(self, plot_type: str) -> Optional[Tuple[str, str, str]]:
+        """
+        Parse dynamic plot type string into components.
+
+        Args:
+            plot_type: Plot type string (e.g., "temperature_parent_age", "radiation_net_child_spacing")
+
+        Returns:
+            Tuple of (variable, domain, comparison) or None if parsing fails
+        """
+        parts = plot_type.split('_')
+
+        # Need at least 3 parts
+        if len(parts) < 3:
+            return None
+
+        # Last two parts are domain and comparison
+        comparison = parts[-1]
+        domain = parts[-2]
+
+        # Everything before that is the variable name (handles multi-word variables)
+        variable = '_'.join(parts[:-2])
+
+        # Validate domain and comparison
+        valid_domains = ['parent', 'child']
+        valid_comparisons = ['age', 'spacing']
+
+        if domain not in valid_domains or comparison not in valid_comparisons:
+            return None
+
+        # Validate variable exists in metadata (if available)
+        if self.var_metadata:
+            try:
+                self.var_metadata.get_variable_config(variable)
+            except KeyError:
+                self.logger.warning(f"Variable '{variable}' not found in metadata")
+                return None
+
+        return (variable, domain, comparison)
+
+    def _find_variable_in_dataset(self, dataset, variable: str) -> Tuple[object, str]:
+        """
+        Find variable in dataset with wildcard support.
+
+        Phase 5: Variable Discovery with Wildcard Support
+
+        Args:
+            dataset: xarray Dataset
+            variable: Variable name from config (e.g., 'temperature', 'utci')
+
+        Returns:
+            Tuple of (xarray DataArray, actual PALM variable name)
+
+        Raises:
+            KeyError: If variable not found
+        """
+        if self.var_metadata:
+            # Use metadata system for variable discovery (supports wildcards)
+            return self.var_metadata.find_variable_in_dataset(dataset, variable)
+        else:
+            # Fallback to legacy hard-coded search for backward compatibility
+            # Try ta, qv, theta
+            for var_name in ['ta', 'qv', 'theta']:
+                if var_name in dataset:
+                    self.logger.debug(f"Found variable (legacy): {var_name}")
+                    return dataset[var_name], var_name
+
+            # Not found
+            available_vars = list(dataset.data_vars.keys())
+            raise KeyError(
+                f"Variable '{variable}' not found using legacy search. "
+                f"Available variables: {available_vars[:20]}..."
+            )
 
     # ========================================================================
     # Plot Type Methods
@@ -138,16 +320,20 @@ class TerrainTransectPlotter(BasePlotter):
     def _extract_terrain_following_slice(self, dataset: xr.Dataset,
                                         static_dataset: xr.Dataset,
                                         domain_type: str,
+                                        variable: str,
                                         z_offset: int,
                                         settings: Dict = None) -> Tuple[np.ndarray, str, bool]:
         """
         Extract TIME-AVERAGED data at constant height above terrain
         Uses xarray for time averaging (matching spatial_cooling.py approach)
 
+        Phase 5 & 6: Now accepts variable parameter for dynamic variable discovery
+
         Args:
-            dataset: xarray Dataset containing 3D averaged data (av_3d)
+            dataset: xarray Dataset containing 3D averaged data (av_3d or av_xy)
             static_dataset: xarray Dataset containing topography
             domain_type: 'parent' or 'child'
+            variable: Variable name from config (e.g., 'temperature', 'utci')
             z_offset: Integer offset from first grid point (0-indexed)
             settings: Plot settings dict (optional, used for time selection parameters)
 
@@ -184,20 +370,9 @@ class TerrainTransectPlotter(BasePlotter):
         # For now, extract at constant z-level
         # TODO: Implement true terrain-following extraction using topography
         try:
-            # Get the variable (ta or qv) - try multiple possible names
-            var_data = None
-            var_name_found = None
-            for var_name in ['ta', 'qv', 'theta']:
-                if var_name in dataset:
-                    var_data = dataset[var_name]
-                    var_name_found = var_name
-                    self.logger.debug(f"Found variable: {var_name}")
-                    break
-
-            if var_data is None:
-                available_vars = list(dataset.data_vars.keys())
-                self.logger.error(f"Could not find temperature or humidity variable. Available variables: {available_vars}")
-                raise KeyError("Could not find temperature or humidity variable in dataset")
+            # Phase 5: Use dynamic variable discovery with wildcard support
+            var_data, var_name_found = self._find_variable_in_dataset(dataset, variable)
+            self.logger.info(f"Found variable '{variable}' as PALM variable '{var_name_found}' in dataset")
 
             # Validate target z-index is within bounds
             if 'zu_3d' in dataset.dims or 'zw_3d' in dataset.dims:
@@ -394,6 +569,7 @@ class TerrainTransectPlotter(BasePlotter):
     def _extract_terrain_following_transect_direct(self, dataset: xr.Dataset,
                                                    static_dataset: xr.Dataset,
                                                    domain_type: str,
+                                                   variable: str,
                                                    z_offset: int,
                                                    transect_axis: str,
                                                    transect_location: int,
@@ -403,14 +579,17 @@ class TerrainTransectPlotter(BasePlotter):
         Extract TIME-AVERAGED 1D transect directly from 4D data [time, z, y, x]
         MEMORY EFFICIENT: ~400× less memory than extracting full 2D slice first
 
+        Phase 5: Now accepts variable parameter for dynamic variable discovery
+
         This method extracts the transect line directly from the 4D dataset,
         then performs time averaging on the 1D transect only, avoiding the need
         to create and store a full 2D spatial slice.
 
         Args:
-            dataset: xarray Dataset containing 3D averaged data (av_3d)
+            dataset: xarray Dataset containing 3D averaged data (av_3d or av_xy)
             static_dataset: xarray Dataset containing topography
             domain_type: 'parent' or 'child'
+            variable: Variable name from config (e.g., 'temperature', 'utci')
             z_offset: Integer offset from first grid point (0-indexed)
             transect_axis: 'x' or 'y' - direction of transect
             transect_location: Grid index for transect location
@@ -454,20 +633,9 @@ class TerrainTransectPlotter(BasePlotter):
         self.logger.info(msg)
 
         try:
-            # Find the variable (ta or qv)
-            var_data = None
-            var_name_found = None
-            for var_name in ['ta', 'qv', 'theta']:
-                if var_name in dataset:
-                    var_data = dataset[var_name]
-                    var_name_found = var_name
-                    self.logger.debug(f"Found variable: {var_name}")
-                    break
-
-            if var_data is None:
-                available_vars = list(dataset.data_vars.keys())
-                self.logger.error(f"Could not find temperature or humidity variable. Available: {available_vars}")
-                raise KeyError("Could not find temperature or humidity variable in dataset")
+            # Phase 5: Use dynamic variable discovery with wildcard support
+            var_data, var_name_found = self._find_variable_in_dataset(dataset, variable)
+            self.logger.info(f"Found variable '{variable}' as PALM variable '{var_name_found}' in dataset")
 
             # Validate z-index
             if 'zu_3d' in dataset.dims or 'zw_3d' in dataset.dims:
@@ -814,6 +982,413 @@ class TerrainTransectPlotter(BasePlotter):
             return np.isclose(value, fill_value, rtol=1e-9, atol=1e-9) or value == fill_value
 
     # ========================================================================
+    # Terrain Mask Caching Helper Methods
+    # ========================================================================
+
+    def _should_use_mask_cache(self, settings: Dict) -> Tuple[bool, str]:
+        """
+        Determine if mask caching should be used.
+
+        Args:
+            settings: Plot settings dictionary
+
+        Returns:
+            (use_cache, mode) where mode is 'save', 'load', 'auto', or 'disabled'
+        """
+        # DEBUG: Log MASK_CACHE_AVAILABLE status
+        self.logger.debug(f"MASK_CACHE_AVAILABLE = {MASK_CACHE_AVAILABLE}")
+
+        if not MASK_CACHE_AVAILABLE:
+            self.logger.info("Mask caching disabled: modules not available")
+            return False, 'disabled'
+
+        tf_settings = settings.get('terrain_following', {})
+        cache_settings = tf_settings.get('mask_cache', {})
+
+        # DEBUG: Log settings structure
+        self.logger.debug(f"terrain_following settings keys: {list(tf_settings.keys())}")
+        self.logger.debug(f"mask_cache settings: {cache_settings}")
+
+        if not cache_settings.get('enabled', False):
+            self.logger.info(f"Mask caching disabled: enabled={cache_settings.get('enabled', False)}")
+            return False, 'disabled'
+
+        mode = cache_settings.get('mode', 'auto')
+        self.logger.info(f"Mask caching ENABLED: mode={mode}")
+        return True, mode
+
+    def _get_mask_cache_path(self,
+                            case_name: str,
+                            domain_type: str,
+                            settings: Dict) -> Path:
+        """
+        Get path for mask cache file.
+
+        Args:
+            case_name: Simulation case name
+            domain_type: 'parent' or 'child'
+            settings: Plot settings dictionary
+
+        Returns:
+            Path to mask file
+        """
+        tf_settings = settings.get('terrain_following', {})
+        cache_settings = tf_settings.get('mask_cache', {})
+
+        cache_dir = Path(cache_settings.get('cache_directory', './cache/terrain_masks'))
+        cache_dir = cache_dir.expanduser().resolve()
+
+        # Get offsets to include in filename
+        levels = cache_settings.get('levels', {})
+        offsets = levels.get('offsets', [0])
+
+        # Parse offsets if string
+        offsets_parsed = parse_offset_specification(
+            offsets,
+            max_levels=levels.get('max_levels', 20)
+        )
+
+        filename = generate_mask_filename(case_name, domain_type, offsets_parsed)
+
+        return cache_dir / filename
+
+    def _save_terrain_mask(self,
+                          case_name: str,
+                          domain_type: str,
+                          mask_data_dict: Dict[str, np.ndarray],
+                          source_levels: np.ndarray,
+                          coordinates: Dict,
+                          settings: Dict,
+                          static_dataset: Optional[xr.Dataset] = None) -> None:
+        """
+        Save terrain-following mask to NetCDF file.
+
+        Args:
+            case_name: Simulation case name
+            domain_type: 'parent' or 'child'
+            mask_data_dict: Dictionary of variable_name -> 3D mask array [ku_above_surf, y, x]
+            source_levels: Source zu_3d indices array [y, x]
+            coordinates: Coordinate arrays (x, y, ku_above_surf)
+            settings: Plot settings
+            static_dataset: Optional static dataset for additional metadata
+        """
+        if not MASK_CACHE_AVAILABLE:
+            self.logger.warning("Mask caching modules not available, cannot save mask")
+            return
+
+        output_path = self._get_mask_cache_path(case_name, domain_type, settings)
+
+        self.logger.info(f"Saving terrain mask to: {output_path}")
+
+        # Prepare metadata
+        tf_settings = settings.get('terrain_following', {})
+        cache_settings = tf_settings.get('mask_cache', {})
+        domain_settings = tf_settings.get(domain_type, {})
+
+        metadata = {
+            'case_name': case_name,
+            'domain_type': domain_type,
+            'buildings_mask_applied': tf_settings.get('buildings_mask', True),
+            'start_z_index': domain_settings.get('start_z_index',
+                                                tf_settings.get('start_z_index', 0)),
+            'max_z_index': domain_settings.get('max_z_index',
+                                              tf_settings.get('max_z_index', 20)),
+            'n_levels': coordinates['ku_above_surf'].size,
+            'nx': coordinates['x'].size,
+            'ny': coordinates['y'].size,
+            'resolution': settings.get('resolution', 0.0),
+            'author': 'PALMPlot',
+        }
+
+        # Add origin info from static dataset if available
+        if static_dataset is not None:
+            if 'origin_x' in static_dataset.attrs:
+                metadata['origin_x'] = static_dataset.attrs['origin_x']
+            if 'origin_y' in static_dataset.attrs:
+                metadata['origin_y'] = static_dataset.attrs['origin_y']
+            if 'origin_z' in static_dataset.attrs:
+                metadata['origin_z'] = static_dataset.attrs['origin_z']
+            if 'rotation_angle' in static_dataset.attrs:
+                metadata['rotation_angle'] = static_dataset.attrs['rotation_angle']
+
+        # Get compression settings
+        compression = cache_settings.get('compression', {'enabled': True, 'level': 4})
+
+        # Write mask
+        try:
+            writer = TerrainMaskWriter(self.logger)
+            writer.write_mask(
+                output_path=output_path,
+                mask_data=mask_data_dict,
+                source_levels=source_levels,
+                coordinates=coordinates,
+                metadata=metadata,
+                compression=compression
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to save terrain mask: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            # Don't raise - caching failure shouldn't stop execution
+
+    def _load_terrain_mask(self,
+                          case_name: str,
+                          domain_type: str,
+                          required_variables: List[str],
+                          settings: Dict,
+                          expected_grid_size: Tuple[int, int]) -> Optional[Dict]:
+        """
+        Load terrain-following mask from NetCDF file.
+
+        Args:
+            case_name: Simulation case name
+            domain_type: 'parent' or 'child'
+            required_variables: List of variables needed
+            settings: Plot settings
+            expected_grid_size: Expected (ny, nx) for validation
+
+        Returns:
+            Dictionary with mask data, or None if loading failed
+        """
+        if not MASK_CACHE_AVAILABLE:
+            self.logger.warning("Mask caching modules not available, cannot load mask")
+            return None
+
+        # Find mask file
+        tf_settings = settings.get('terrain_following', {})
+        cache_settings = tf_settings.get('mask_cache', {})
+        cache_dir = Path(cache_settings.get('cache_directory', './cache/terrain_masks'))
+
+        mask_path = find_existing_mask_file(cache_dir, case_name, domain_type)
+
+        if mask_path is None:
+            self.logger.info(f"No cached mask found for {case_name} ({domain_type})")
+            return None
+
+        self.logger.info(f"Found cached mask: {mask_path.name}")
+
+        # Load mask
+        reader = TerrainMaskReader(self.logger)
+
+        try:
+            validation_settings = cache_settings.get('validation', {})
+            result = reader.read_mask(
+                input_path=mask_path,
+                variables=required_variables,
+                validate=True,
+                validation_settings=validation_settings
+            )
+
+            # Check compatibility
+            is_compatible, issues = reader.check_mask_compatibility(
+                mask_metadata=result['metadata'],
+                expected_grid_size=expected_grid_size,
+                expected_domain=domain_type,
+                validation_settings=validation_settings
+            )
+
+            if not is_compatible:
+                on_mismatch = validation_settings.get('on_mismatch', 'recompute')
+                if on_mismatch == 'error':
+                    raise ValueError(f"Mask compatibility check failed: {issues}")
+                elif on_mismatch == 'warn':
+                    self.logger.warning(
+                        f"Mask compatibility issues detected but continuing: {issues}"
+                    )
+                else:  # recompute
+                    self.logger.warning(
+                        f"Mask compatibility check failed, will recompute: {issues}"
+                    )
+                    return None
+
+            self.logger.info(
+                f"Successfully loaded mask with {len(result['mask_data'])} variables, "
+                f"{result['coordinates']['ku_above_surf'].size} levels"
+            )
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Failed to load mask: {e}")
+
+            on_mismatch = cache_settings.get('validation', {}).get('on_mismatch', 'recompute')
+            if on_mismatch == 'error':
+                raise
+            else:
+                self.logger.warning("Falling back to mask computation")
+                return None
+
+    # ========================================================================
+    # Surface Data Caching Methods (for av_xy variables)
+    # ========================================================================
+
+    def _get_surface_data_cache_path(self,
+                                    case_name: str,
+                                    domain_type: str,
+                                    settings: Dict) -> Path:
+        """
+        Get path for surface data cache file.
+
+        Args:
+            case_name: Simulation case name
+            domain_type: 'parent' or 'child'
+            settings: Plot settings dictionary
+
+        Returns:
+            Path to surface data cache file
+        """
+        tf_settings = settings.get('terrain_following', {})
+        cache_settings = tf_settings.get('surface_data_cache', {})
+
+        cache_dir = Path(cache_settings.get('cache_directory', './cache/surface_data'))
+        cache_dir = cache_dir.expanduser().resolve()
+
+        filename = generate_surface_data_filename(case_name, domain_type)
+
+        return cache_dir / filename
+
+    def _save_surface_data(self,
+                          case_name: str,
+                          domain_type: str,
+                          surface_data_dict: Dict[str, np.ndarray],
+                          coordinates: Dict,
+                          metadata: Dict,
+                          settings: Dict) -> None:
+        """
+        Save time-averaged surface data to NetCDF file.
+
+        Args:
+            case_name: Simulation case name
+            domain_type: 'parent' or 'child'
+            surface_data_dict: Dictionary of variable_name -> 2D array [y, x]
+            coordinates: Coordinate arrays (x, y)
+            metadata: Metadata dictionary
+            settings: Plot settings
+        """
+        if not SURFACE_DATA_CACHE_AVAILABLE:
+            self.logger.warning("Surface data caching modules not available, cannot save")
+            return
+
+        output_path = self._get_surface_data_cache_path(case_name, domain_type, settings)
+
+        self.logger.info(f"Saving surface data to: {output_path}")
+
+        # Prepare metadata
+        tf_settings = settings.get('terrain_following', {})
+        cache_settings = tf_settings.get('surface_data_cache', {})
+
+        # Add domain and grid info to metadata
+        metadata['case_name'] = case_name
+        metadata['domain_type'] = domain_type
+        metadata['nx'] = coordinates['x'].size
+        metadata['ny'] = coordinates['y'].size
+        metadata['resolution'] = settings.get('resolution', 0.0)
+        metadata['author'] = 'PALMPlot'
+
+        # Get compression settings
+        compression = cache_settings.get('compression', {'enabled': True, 'level': 4})
+
+        # Write surface data
+        try:
+            writer = SurfaceDataWriter(self.logger)
+            writer.write_surface_data(
+                output_path=output_path,
+                surface_data=surface_data_dict,
+                coordinates=coordinates,
+                metadata=metadata,
+                compression=compression
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to save surface data: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            # Don't raise - caching failure shouldn't stop execution
+
+    def _load_surface_data(self,
+                          case_name: str,
+                          domain_type: str,
+                          required_variables: Optional[List[str]],
+                          settings: Dict,
+                          expected_grid_size: Tuple[int, int]) -> Optional[Dict]:
+        """
+        Load time-averaged surface data from NetCDF file.
+
+        Args:
+            case_name: Simulation case name
+            domain_type: 'parent' or 'child'
+            required_variables: Optional list of variables needed (None = all)
+            settings: Plot settings
+            expected_grid_size: Expected (ny, nx) for validation
+
+        Returns:
+            Dictionary with surface data, or None if loading failed
+        """
+        if not SURFACE_DATA_CACHE_AVAILABLE:
+            self.logger.warning("Surface data caching modules not available, cannot load")
+            return None
+
+        # Find surface data file
+        tf_settings = settings.get('terrain_following', {})
+        cache_settings = tf_settings.get('surface_data_cache', {})
+        cache_dir = Path(cache_settings.get('cache_directory', './cache/surface_data'))
+
+        surface_data_path = find_existing_surface_data_file(cache_dir, case_name, domain_type)
+
+        if surface_data_path is None:
+            self.logger.info(f"No cached surface data found for {case_name} ({domain_type})")
+            return None
+
+        self.logger.info(f"Found cached surface data: {surface_data_path.name}")
+
+        # Load surface data
+        reader = SurfaceDataReader(self.logger)
+
+        try:
+            validation_settings = cache_settings.get('validation', {})
+            result = reader.read_surface_data(
+                input_path=surface_data_path,
+                variables=required_variables,
+                validate=True,
+                validation_settings=validation_settings
+            )
+
+            # Check compatibility
+            is_compatible, issues = reader.check_surface_data_compatibility(
+                surface_metadata=result['metadata'],
+                expected_grid_size=expected_grid_size,
+                expected_domain=domain_type,
+                validation_settings=validation_settings
+            )
+
+            if not is_compatible:
+                on_mismatch = validation_settings.get('on_mismatch', 'recompute')
+                if on_mismatch == 'error':
+                    raise ValueError(f"Surface data compatibility check failed: {issues}")
+                elif on_mismatch == 'warn':
+                    self.logger.warning(
+                        f"Surface data compatibility issues detected but continuing: {issues}"
+                    )
+                else:  # recompute
+                    self.logger.warning(
+                        f"Surface data compatibility check failed, will recompute: {issues}"
+                    )
+                    return None
+
+            self.logger.info(
+                f"Successfully loaded surface data with {len(result['surface_data'])} variables"
+            )
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Failed to load surface data: {e}")
+
+            on_mismatch = cache_settings.get('validation', {}).get('on_mismatch', 'recompute')
+            if on_mismatch == 'error':
+                raise
+            else:
+                self.logger.warning("Falling back to surface data extraction")
+                return None
+
+    # ========================================================================
     # Terrain-Following Extraction Method
     # ========================================================================
 
@@ -821,6 +1396,7 @@ class TerrainTransectPlotter(BasePlotter):
                                      dataset: xr.Dataset,
                                      static_dataset: xr.Dataset,
                                      domain_type: str,
+                                     variable: str,
                                      buildings_mask: bool,
                                      output_mode: str,
                                      transect_axis: str = None,
@@ -830,6 +1406,8 @@ class TerrainTransectPlotter(BasePlotter):
                                                                      Tuple[np.ndarray, np.ndarray, str, bool]]:
         """
         Extract terrain-following data by iterating from lowest vertical level upwards.
+
+        Phase 5: Now accepts variable parameter for dynamic variable discovery
 
         This method implements a "bottom-up" filling algorithm:
         1. Start from zu_3d[0] (lowest vertical level)
@@ -841,9 +1419,10 @@ class TerrainTransectPlotter(BasePlotter):
         always using the lowest available valid data above terrain/buildings.
 
         Args:
-            dataset: xarray Dataset containing 3D averaged data (av_3d)
+            dataset: xarray Dataset containing 3D averaged data (av_3d or av_xy)
             static_dataset: xarray Dataset containing topography and buildings
             domain_type: 'parent' or 'child'
+            variable: Variable name from config (e.g., 'temperature', 'utci')
             buildings_mask: If True, exclude building locations (leave as NaN)
                            If False, fill through buildings from level above
             output_mode: '2d' for full spatial field, '1d' for transect only
@@ -872,6 +1451,110 @@ class TerrainTransectPlotter(BasePlotter):
         # Default settings if none provided
         if settings is None:
             settings = {}
+
+        # ===== NEW: CHECK FOR CACHED MASK =====
+        use_cache, cache_mode = self._should_use_mask_cache(settings)
+        cached_result = None
+
+        if use_cache and cache_mode in ['load', 'auto']:
+            # Try to load existing mask
+            case_name = settings.get('case_name', 'unknown')
+            required_vars = [settings.get('variable', 'ta')]
+
+            # Get grid size for validation
+            ny = dataset.dims['y']
+            nx = dataset.dims['x']
+
+            cached_result = self._load_terrain_mask(
+                case_name=case_name,
+                domain_type=domain_type,
+                required_variables=required_vars,
+                settings=settings,
+                expected_grid_size=(ny, nx)
+            )
+
+            if cached_result is not None:
+                # Successfully loaded mask from cache
+                self.logger.info("✓ Using cached terrain mask - skipping computation")
+
+                # Extract appropriate data from cached mask
+                mask_data = cached_result['mask_data']
+                var_name = required_vars[0]
+
+                if var_name not in mask_data:
+                    self.logger.warning(
+                        f"Variable '{var_name}' not found in cached mask, will recompute"
+                    )
+                    cached_result = None
+                else:
+                    # Get the mask data
+                    cached_mask = mask_data[var_name]  # Shape: [ku_above_surf, y, x]
+
+                    # Handle transect_z_offset if specified
+                    tf_settings = settings.get('terrain_following', {})
+                    domain_settings = tf_settings.get(domain_type, {})
+                    transect_z_offset = domain_settings.get(
+                        'transect_z_offset',
+                        tf_settings.get('transect_z_offset', None)
+                    )
+
+                    # Extract appropriate level
+                    if transect_z_offset is not None and transect_z_offset != 0:
+                        # Direct mapping: ku_above_surf level N = offset N
+                        # (Level 0 = offset 0 at terrain, Level 1 = offset 1, etc.)
+                        ku_level = transect_z_offset
+                        if ku_level < cached_mask.shape[0]:
+                            filled_2d = cached_mask[ku_level, :, :]
+                            self.logger.info(
+                                f"Using cached offset level {transect_z_offset} "
+                                f"(ku_above_surf[{ku_level}])"
+                            )
+                        else:
+                            self.logger.warning(
+                                f"Requested offset {transect_z_offset} not in cache "
+                                f"(max ku_level: {cached_mask.shape[0]-1}), will recompute"
+                            )
+                            cached_result = None
+                    else:
+                        # Use base mask (offset 0 = ku_level 0)
+                        filled_2d = cached_mask[0, :, :]
+                        self.logger.info("Using cached base mask (offset 0)")
+
+                    # If we successfully got cached data, return it
+                    if cached_result is not None:
+                        # Determine if conversion needed
+                        needs_kelvin_conversion = False
+                        if var_name in ['theta']:
+                            needs_kelvin_conversion = True
+
+                        # Return based on output mode
+                        if output_mode == '2d':
+                            return filled_2d, var_name, needs_kelvin_conversion
+
+                        elif output_mode == '1d':
+                            # Extract transect from cached 2D field
+                            if transect_axis == 'x':
+                                y_min = max(0, transect_location - transect_width)
+                                y_max = min(ny, transect_location + transect_width + 1)
+                                transect = np.nanmean(filled_2d[y_min:y_max, :], axis=0)
+                                coords = dataset['x'].values if 'x' in dataset.coords else np.arange(nx)
+                            else:  # y-axis
+                                x_min = max(0, transect_location - transect_width)
+                                x_max = min(nx, transect_location + transect_width + 1)
+                                transect = np.nanmean(filled_2d[:, x_min:x_max], axis=1)
+                                coords = dataset['y'].values if 'y' in dataset.coords else np.arange(ny)
+
+                            return transect, coords, var_name, needs_kelvin_conversion
+
+            elif cache_mode == 'load':
+                # Load mode but no file found - error
+                raise FileNotFoundError(
+                    f"Mask cache mode is 'load' but no cached mask found for "
+                    f"{case_name} ({domain_type})"
+                )
+
+        # If we get here, either caching is disabled or cache load failed
+        # Continue with normal terrain-following computation
 
         # Log extraction configuration
         msg = f"\n=== TERRAIN-FOLLOWING EXTRACTION ==="
@@ -929,20 +1612,336 @@ class TerrainTransectPlotter(BasePlotter):
             print(msg)
             self.logger.info(msg)
 
-            # Find the variable (ta or qv)
-            var_data = None
-            var_name_found = None
-            for var_name in ['ta', 'qv', 'theta']:
-                if var_name in dataset:
-                    var_data = dataset[var_name]
-                    var_name_found = var_name
-                    self.logger.debug(f"Found variable: {var_name}")
-                    break
+            # Phase 5: Use dynamic variable discovery with wildcard support
+            var_data, var_name_found = self._find_variable_in_dataset(dataset, variable)
+            self.logger.info(f"Found variable '{variable}' as PALM variable '{var_name_found}' in dataset")
 
-            if var_data is None:
-                available_vars = list(dataset.data_vars.keys())
-                self.logger.error(f"Could not find temperature or humidity variable. Available: {available_vars}")
-                raise KeyError("Could not find temperature or humidity variable in dataset")
+            # Phase 6: Dimensionality Detection - Check if 2D (surface) or 3D (atmospheric)
+            is_2d_surface = False
+            z_dim = None
+
+            # Check for 3D atmospheric dimensions (zu_3d, zw_3d)
+            if 'zu_3d' in var_data.dims:
+                z_dim = 'zu_3d'
+                is_2d_surface = False
+            elif 'zw_3d' in var_data.dims:
+                z_dim = 'zw_3d'
+                is_2d_surface = False
+            # Check for 2D surface dimensions (zu1_xy, zu_xy)
+            elif 'zu1_xy' in var_data.dims:
+                z_dim = 'zu1_xy'
+                is_2d_surface = True
+            elif 'zu_xy' in var_data.dims:
+                z_dim = 'zu_xy'
+                is_2d_surface = True
+            else:
+                # Check if already 2D (time, y, x)
+                if len(var_data.dims) == 3 and 'time' in var_data.dims:
+                    is_2d_surface = True
+                    z_dim = None
+                    msg = "  Variable is 2D (no vertical dimension)"
+                    print(msg)
+                    self.logger.info(msg)
+                else:
+                    available_dims = list(var_data.dims)
+                    raise ValueError(
+                        f"Could not find recognized vertical dimension in variable '{var_name_found}'. "
+                        f"Available dimensions: {available_dims}. "
+                        f"Expected: zu_3d, zw_3d, zu1_xy, or zu_xy"
+                    )
+
+            # Handle 2D surface variables differently (NO terrain-following)
+            if is_2d_surface:
+                msg = f"\n=== SURFACE VARIABLE DETECTED (2D) ==="
+                print(msg)
+                self.logger.info(msg)
+                msg = f"  Variable '{var_name_found}' is a surface variable (file_type: av_xy)"
+                print(msg)
+                self.logger.info(msg)
+                msg = f"  Skipping terrain-following extraction, using surface level directly"
+                print(msg)
+                self.logger.info(msg)
+
+                # ===== CHECK SURFACE DATA CACHE =====
+                # Try to load from cache if enabled
+                tf_settings = settings.get('terrain_following', {})
+                cache_settings = tf_settings.get('surface_data_cache', {})
+                cache_enabled = cache_settings.get('enabled', False)
+                cache_mode = cache_settings.get('mode', 'disabled')
+
+                if cache_enabled and cache_mode in ['load', 'update']:
+                    # Get case_name from settings (added by _extract_scenario_data)
+                    case_name = settings.get('case_name', 'unknown')
+
+                    # Get grid size for validation
+                    ny, nx = var_data.shape[-2:]  # Last two dimensions are y, x
+                    expected_grid_size = (ny, nx)
+
+                    # Try to load from cache
+                    cached_surface_data = self._load_surface_data(
+                        case_name=case_name,
+                        domain_type=domain_type,
+                        required_variables=[var_name_found],
+                        settings=settings,
+                        expected_grid_size=expected_grid_size
+                    )
+
+                    # Check if the requested variable is in cache
+                    if cached_surface_data and var_name_found in cached_surface_data['surface_data']:
+                        msg = f"  ✓ Found '{var_name_found}' in surface data cache, using cached data"
+                        print(msg)
+                        self.logger.info(msg)
+
+                        filled_2d = cached_surface_data['surface_data'][var_name_found]
+                        needs_conversion = False  # Cached data already processed
+
+                        msg = f"\n=== SURFACE DATA LOADED FROM CACHE ==="
+                        print(msg)
+                        self.logger.info(msg)
+                        msg = f"  2D field shape: {filled_2d.shape}"
+                        print(msg)
+                        self.logger.info(msg)
+                        msg = f"  Data range: min={np.nanmin(filled_2d):.2f}, max={np.nanmax(filled_2d):.2f}, mean={np.nanmean(filled_2d):.2f}"
+                        print(msg)
+                        self.logger.info(msg)
+
+                        # Return based on output mode
+                        if output_mode == '1d':
+                            # Extract 1D transect from cached 2D surface
+                            transect_values, coordinates = self._extract_transect_line(
+                                filled_2d, transect_axis, transect_location, transect_width
+                            )
+                            return transect_values, coordinates, var_name_found, needs_conversion
+                        else:  # '2d'
+                            return filled_2d, var_name_found, needs_conversion
+                    else:
+                        msg = f"  Variable '{var_name_found}' not in cache, will extract"
+                        print(msg)
+                        self.logger.info(msg)
+
+                # Extract surface data directly
+                if z_dim and z_dim in var_data.dims:
+                    # Has zu1_xy or zu_xy dimension - extract first level
+                    slice_data_with_time = var_data.isel({z_dim: 0})
+                    msg = f"  Extracted surface level ({z_dim}[0])"
+                    print(msg)
+                    self.logger.info(msg)
+                else:
+                    # Already 2D
+                    slice_data_with_time = var_data
+                    msg = f"  Variable is already 2D (time, y, x)"
+                    print(msg)
+                    self.logger.info(msg)
+
+                # Apply time averaging
+                msg = "\n=== TIME SELECTION CONFIGURATION ==="
+                print(msg)
+                self.logger.info(msg)
+
+                time_selection_method = settings.get('time_selection_method', 'mean')
+                total_time_steps = slice_data_with_time.shape[0]
+                msg = f"  Total available time steps: {total_time_steps}"
+                print(msg)
+                self.logger.info(msg)
+                msg = f"  Method: '{time_selection_method}'"
+                print(msg)
+                self.logger.info(msg)
+
+                # Time averaging with corruption detection
+                msg = f"  Time processing: Averaging with corrupted step detection..."
+                print(msg)
+                self.logger.info(msg)
+
+                # Detect and exclude corrupted time steps
+                n_time_before = slice_data_with_time.shape[0]
+                valid_time_mask = []
+
+                for t_idx in range(n_time_before):
+                    slice_t = slice_data_with_time.isel(time=t_idx)
+                    test_values = slice_t.values.ravel()
+                    test_values_clean = test_values[~np.isnan(test_values)]
+
+                    if len(test_values_clean) > 0:
+                        # For temperature: suspicious if any value < 5.0°C
+                        # For other variables: check for extreme outliers or NaN
+                        if var_name_found in ['ta', 'theta', 'pt']:
+                            suspicious = np.any(test_values_clean < 5.0)
+                        else:
+                            # For non-temperature variables, check for all NaN or extreme outliers
+                            suspicious = False
+                        valid_time_mask.append(not suspicious)
+                    else:
+                        valid_time_mask.append(True)
+
+                valid_time_mask = np.array(valid_time_mask)
+                n_corrupted = np.sum(~valid_time_mask)
+                n_valid = np.sum(valid_time_mask)
+
+                if n_corrupted > 0:
+                    msg = f"  Found {n_corrupted} corrupted time steps, using {n_valid} valid steps"
+                    print(msg)
+                    self.logger.warning(msg)
+
+                    valid_indices = np.where(valid_time_mask)[0]
+                    slice_data_with_time = slice_data_with_time.isel(time=valid_indices)
+                else:
+                    msg = f"  All {n_time_before} time steps are valid"
+                    print(msg)
+                    self.logger.info(msg)
+
+                # Perform time averaging using xarray
+                filled_2d = slice_data_with_time.mean(dim='time').values
+
+                msg = f"  Time averaging complete"
+                print(msg)
+                self.logger.info(msg)
+
+                # Check if unit conversion needed (Kelvin to Celsius)
+                # PALM typically outputs temperature in Kelvin (values ~297K for 24°C)
+                # If mean value > 100, assume it's in Kelvin
+                valid_data = filled_2d[~np.isnan(filled_2d)]
+                if len(valid_data) > 0:
+                    data_mean = np.mean(valid_data)
+                    needs_conversion = data_mean > 100.0
+                else:
+                    needs_conversion = False
+
+                msg = f"  Temperature unit detection: needs_kelvin_conversion={needs_conversion}"
+                print(msg)
+                self.logger.info(msg)
+
+                msg = f"\n=== SURFACE EXTRACTION COMPLETE ==="
+                print(msg)
+                self.logger.info(msg)
+                msg = f"  2D field shape: {filled_2d.shape}"
+                print(msg)
+                self.logger.info(msg)
+                msg = f"  Data range: min={np.nanmin(filled_2d):.2f}, max={np.nanmax(filled_2d):.2f}, mean={np.nanmean(filled_2d):.2f}"
+                print(msg)
+                self.logger.info(msg)
+
+                # ===== SAVE TO SURFACE DATA CACHE =====
+                # Save to cache if enabled (if not already loaded from cache)
+                if cache_enabled and cache_mode in ['save', 'update']:
+                    # Get case_name from settings (added by _extract_scenario_data)
+                    case_name = settings.get('case_name', 'unknown')
+
+                    # Check if this variable should be cached
+                    # Get list of variables to cache for this domain
+                    domain_cache_settings = cache_settings.get(domain_type, {})
+                    cache_variables = domain_cache_settings.get('variables', [])
+
+                    # Check if variable should be cached
+                    should_cache = False
+                    if cache_variables == 'auto':
+                        # Auto mode: cache all av_xy variables
+                        should_cache = True
+                    elif isinstance(cache_variables, list):
+                        # Check if variable in list (using the internal variable name from config)
+                        should_cache = variable in cache_variables
+
+                    if should_cache:
+                        msg = f"  Saving '{var_name_found}' to surface data cache..."
+                        print(msg)
+                        self.logger.info(msg)
+
+                        # Get grid dimensions from data
+                        ny, nx = filled_2d.shape
+
+                        # Start with new variable
+                        surface_data_dict = {var_name_found: filled_2d}
+
+                        # Check if cache file already exists (for multi-variable merging)
+                        cache_path = self._get_surface_data_cache_path(case_name, domain_type, settings)
+
+                        if cache_path.exists():
+                            msg = f"  Found existing cache file, will merge variables"
+                            print(msg)
+                            self.logger.info(msg)
+                            try:
+                                # Load existing variables
+                                existing_cache = self._load_surface_data(
+                                    case_name=case_name,
+                                    domain_type=domain_type,
+                                    required_variables=None,  # Load all
+                                    settings=settings,
+                                    expected_grid_size=(ny, nx)
+                                )
+
+                                if existing_cache and 'surface_data' in existing_cache:
+                                    # Merge existing variables with new variable
+                                    for existing_var, existing_data in existing_cache['surface_data'].items():
+                                        if existing_var != var_name_found:
+                                            surface_data_dict[existing_var] = existing_data
+                                            msg = f"    Keeping existing variable '{existing_var}' in cache"
+                                            print(msg)
+                                            self.logger.info(msg)
+                                        else:
+                                            msg = f"    Updating variable '{var_name_found}' in cache"
+                                            print(msg)
+                                            self.logger.info(msg)
+
+                                    msg = f"  Multi-variable cache: {len(surface_data_dict)} total variables"
+                                    print(msg)
+                                    self.logger.info(msg)
+                            except Exception as e:
+                                msg = f"  Could not merge with existing cache: {e}"
+                                print(msg)
+                                self.logger.warning(msg)
+
+                        # Prepare coordinates
+                        coords = {
+                            'x': dataset['x'].values if 'x' in dataset.coords else np.arange(nx, dtype=float),
+                            'y': dataset['y'].values if 'y' in dataset.coords else np.arange(ny, dtype=float),
+                        }
+
+                        # Prepare metadata
+                        metadata = {
+                            'time_averaging_method': time_selection_method,
+                            'time_steps_used': n_valid,
+                            'time_steps_total': n_time_before,
+                            'time_steps_corrupted': n_corrupted,
+                        }
+
+                        # Add variable-specific metadata
+                        if self.var_metadata:
+                            try:
+                                var_config = self.var_metadata.get_variable_config(variable)
+                                metadata['variable_metadata'] = {
+                                    var_name_found: {
+                                        'units': var_config.get('units_out', ''),
+                                        'long_name': var_config.get('label', var_name_found),
+                                    }
+                                }
+                            except:
+                                pass
+
+                        # Save surface data
+                        self._save_surface_data(
+                            case_name=case_name,
+                            domain_type=domain_type,
+                            surface_data_dict=surface_data_dict,
+                            coordinates=coords,
+                            metadata=metadata,
+                            settings=settings
+                        )
+
+                        var_list = list(surface_data_dict.keys())
+                        msg = f"  ✓ Surface data saved to cache: {len(surface_data_dict)} variable(s) - {var_list}"
+                        print(msg)
+                        self.logger.info(msg)
+
+                # Return based on output mode
+                if output_mode == '1d':
+                    # Extract 1D transect from 2D surface
+                    transect_values, coordinates = self._extract_transect_line(
+                        filled_2d, transect_axis, transect_location, transect_width
+                    )
+                    return transect_values, coordinates, var_name_found, needs_conversion
+                else:  # '2d'
+                    return filled_2d, var_name_found, needs_conversion
+
+            # ===== 3D ATMOSPHERIC VARIABLE - Continue with terrain-following =====
 
             # Detect fill values
             has_fill_value, fill_value = self._detect_fill_values(var_data)
@@ -950,17 +1949,13 @@ class TerrainTransectPlotter(BasePlotter):
             print(msg)
             self.logger.info(msg)
 
-            # Get vertical dimension and coordinates
-            if 'zu_3d' in dataset.dims or 'zw_3d' in dataset.dims:
-                z_dim = 'zu_3d' if 'zu_3d' in dataset.dims else 'zw_3d'
-                z_coords = dataset[z_dim].values
-                n_z_levels = len(z_coords)
+            # Get vertical coordinates
+            z_coords = dataset[z_dim].values
+            n_z_levels = len(z_coords)
 
-                msg = f"  Vertical levels: {n_z_levels} (heights: {z_coords[0]:.2f}m to {z_coords[-1]:.2f}m)"
-                print(msg)
-                self.logger.info(msg)
-            else:
-                raise ValueError(f"Could not find vertical dimension (zu_3d or zw_3d) in dataset")
+            msg = f"  Vertical levels: {n_z_levels} (heights: {z_coords[0]:.2f}m to {z_coords[-1]:.2f}m)"
+            print(msg)
+            self.logger.info(msg)
 
             # Validate z-index range
             if start_z_index < 0 or start_z_index >= n_z_levels:
@@ -1304,6 +2299,169 @@ class TerrainTransectPlotter(BasePlotter):
                 self.logger.info(msg)
             else:
                 needs_kelvin_conversion = False
+
+            # ===== NEW: SAVE MASK IF CACHING ENABLED =====
+            # DEBUG: Log cache status
+            self.logger.info(f"Cache status: use_cache={use_cache}, cache_mode={cache_mode}, cached_result={cached_result is not None}")
+
+            if use_cache and cache_mode in ['save', 'auto']:
+                # Check if we should save (auto mode only saves if file didn't exist)
+                should_save = (cache_mode == 'save') or \
+                             (cache_mode == 'auto' and cached_result is None)
+
+
+                if should_save:
+                    try:
+                        self.logger.info("Saving terrain mask to cache...")
+
+                        # Get cache settings
+                        tf_settings = settings.get('terrain_following', {})
+                        cache_settings = tf_settings.get('mask_cache', {})
+                        levels = cache_settings.get('levels', {})
+
+                        # Parse offsets to save
+                        offsets_to_save = parse_offset_specification(
+                            levels.get('offsets', [0]),
+                            max_levels=levels.get('max_levels', 20)
+                        )
+
+                        # Compute masks for all requested offsets
+                        # We already have filled_array which is either:
+                        # - Base terrain-following (if transect_z_offset is None or 0)
+                        # - Offset terrain-following (if transect_z_offset was specified)
+
+                        # Determine which offset level we currently have
+                        current_offset = transect_z_offset if (transect_z_offset is not None and transect_z_offset != 0) else 0
+
+                        # Determine maximum ku_level needed
+                        # Direct mapping: ku_above_surf level N = offset N
+                        max_ku_level = max(offsets_to_save) + 1
+
+                        # Initialize 3D mask array [ku_above_surf, y, x]
+                        mask_3d = np.full((max_ku_level, ny, nx), fill_value, dtype=np.float32)
+
+                        # For each requested offset, compute the mask
+                        for offset in offsets_to_save:
+                            ku_level = offset  # Direct mapping: ku_above_surf level N = offset N
+
+                            if ku_level >= max_ku_level:
+                                continue
+
+                            # If this is the offset we already computed, use it
+                            if offset == current_offset:
+                                mask_3d[ku_level, :, :] = filled_array
+                                self.logger.info(f"  Using computed data for offset {offset} (ku_level {ku_level})")
+                                continue
+
+                            # Otherwise, compute this offset level
+                            self.logger.info(f"  Computing offset {offset} (ku_level {ku_level})...")
+
+                            if offset == 0:
+                                # This is the base terrain-following mask
+                                # We need to use source_level_array without offset
+                                target_z_array = source_level_array.copy()
+                            else:
+                                # Apply offset to source levels
+                                target_z_array = source_level_array + offset
+
+                            # Check which cells are valid (in bounds and have valid source)
+                            valid_mask = (source_level_array >= 0) & \
+                                       (target_z_array >= 0) & \
+                                       (target_z_array < n_z_levels)
+
+                            if np.any(valid_mask):
+                                # Use vectorized extraction (same as main computation)
+                                full_data_array = var_data_time_avg.values
+                                y_indices, x_indices = np.meshgrid(
+                                    np.arange(ny), np.arange(nx), indexing='ij'
+                                )
+
+                                target_zs = target_z_array[valid_mask].astype(int)
+                                y_coords = y_indices[valid_mask]
+                                x_coords = x_indices[valid_mask]
+
+                                extracted_values = full_data_array[target_zs, y_coords, x_coords]
+
+                                # Check for fill values
+                                if np.isnan(fill_value):
+                                    valid_value_mask = ~np.isnan(extracted_values)
+                                else:
+                                    valid_value_mask = ~(
+                                        np.isclose(extracted_values, fill_value, rtol=1e-9, atol=1e-9) |
+                                        (extracted_values == fill_value)
+                                    )
+
+                                # Create temporary array for assignments
+                                temp_values = np.full(np.sum(valid_mask), np.nan, dtype=np.float32)
+                                temp_values[valid_value_mask] = extracted_values[valid_value_mask]
+
+                                # Assign to 3D mask
+                                mask_3d[ku_level, valid_mask] = temp_values
+
+                                n_valid = np.sum(~np.isnan(mask_3d[ku_level, :, :]))
+                                self.logger.info(f"    Computed {n_valid} valid cells for offset {offset}")
+
+                        # Prepare mask data dictionary - START WITH NEW VARIABLE
+                        mask_data_dict = {var_name_found: mask_3d}
+
+                        # Check if we should merge with existing cache file
+                        case_name = settings.get('case_name', 'unknown')
+                        cache_path = self._get_mask_cache_path(case_name, domain_type, settings)
+
+                        if cache_path.exists():
+                            self.logger.info(f"Found existing cache file, will merge variables: {cache_path.name}")
+                            try:
+                                # Load existing variables from cache
+                                existing_mask = self._load_terrain_mask(
+                                    case_name=case_name,
+                                    domain_type=domain_type,
+                                    required_variables=None,  # Load all variables
+                                    settings=settings,
+                                    expected_grid_size=(ny, nx)
+                                )
+
+                                if existing_mask and 'mask_data' in existing_mask:
+                                    # Merge existing variables with new variable
+                                    for existing_var, existing_data in existing_mask['mask_data'].items():
+                                        if existing_var != var_name_found:
+                                            # Keep existing variables that aren't being updated
+                                            mask_data_dict[existing_var] = existing_data
+                                            self.logger.info(f"  Keeping existing variable '{existing_var}' in cache")
+                                        else:
+                                            self.logger.info(f"  Updating variable '{var_name_found}' in cache")
+
+                                    self.logger.info(f"Multi-variable cache: {len(mask_data_dict)} total variables")
+                            except Exception as e:
+                                self.logger.warning(f"Could not merge with existing cache: {e}")
+                                # Continue with just the new variable
+
+                        # Prepare coordinates
+                        coords = {
+                            'x': dataset['x'].values if 'x' in dataset.coords else np.arange(nx, dtype=float),
+                            'y': dataset['y'].values if 'y' in dataset.coords else np.arange(ny, dtype=float),
+                            'ku_above_surf': np.arange(max_ku_level, dtype=float),
+                        }
+
+                        # Save mask (now with potentially multiple variables)
+                        self._save_terrain_mask(
+                            case_name=case_name,
+                            domain_type=domain_type,
+                            mask_data_dict=mask_data_dict,
+                            source_levels=source_level_array,
+                            coordinates=coords,
+                            settings=settings,
+                            static_dataset=static_dataset
+                        )
+
+                        var_count = len(mask_data_dict)
+                        var_list = list(mask_data_dict.keys())
+                        self.logger.info(f"✓ Terrain mask saved to cache: {var_count} variable(s) - {var_list}")
+
+                    except Exception as e:
+                        self.logger.error(f"Failed to save terrain mask (non-fatal): {e}")
+                        # Don't raise - caching failure shouldn't stop execution
+                        import traceback
+                        self.logger.debug(traceback.format_exc())
 
             if output_mode == '2d':
                 # Return full 2D field
@@ -1709,20 +2867,57 @@ class TerrainTransectPlotter(BasePlotter):
                     return None
                 case_data = data['simulations'][case_key]
 
-            # Get appropriate dataset based on domain
-            if domain == 'child':
-                if 'av_3d_n02' not in case_data:
-                    self.logger.warning(f"Child domain data not available for {scenario['label']}")
-                    return None
-                dataset = case_data['av_3d_n02']
-                static_dataset = case_data.get('static_n02')
-
+            # Get appropriate dataset based on domain AND variable file type
+            # Phase 4: File type routing based on variable metadata
+            if self.var_metadata:
+                try:
+                    file_type = self.var_metadata.get_file_type(variable)
+                    self.logger.debug(f"Variable '{variable}' requires file type: {file_type}")
+                except KeyError:
+                    # Variable not in metadata, assume av_3d for backward compatibility
+                    self.logger.warning(f"Variable '{variable}' not in metadata, assuming av_3d")
+                    file_type = 'av_3d'
             else:
-                if 'av_3d' not in case_data:
-                    self.logger.warning(f"Parent domain data not available for {scenario['label']}")
-                    return None
-                dataset = case_data['av_3d']
+                # No metadata available, fall back to legacy behavior (assume 3D)
+                file_type = 'av_3d'
+
+            # Select dataset key based on file type and domain
+            if domain == 'child':
+                dataset_key = f"{file_type}_n02"
+            else:
+                dataset_key = file_type
+
+            # Check if dataset exists
+            if dataset_key not in case_data:
+                self.logger.error(
+                    f"Required dataset '{dataset_key}' not found for variable '{variable}', "
+                    f"domain '{domain}', scenario '{scenario['label']}'. "
+                    f"Available datasets: {list(case_data.keys())}"
+                )
+                return None
+
+            dataset = case_data[dataset_key]
+            self.logger.info(f"Using dataset '{dataset_key}' for variable '{variable}' in {domain} domain")
+
+            # Get static dataset for building/LAD masks
+            if domain == 'child':
+                static_dataset = case_data.get('static_n02')
+            else:
                 static_dataset = case_data.get('static')
+
+            # ===== NEW: Add case_name to settings for mask caching =====
+            # Extract case name from scenario
+            if scenario['spacing'] is None:
+                # Base case
+                case_name = 'thf_base_2018080700'  # Base case name
+            else:
+                # Tree scenario - construct full case name
+                case_name = f"thf_forest_lad_spacing_{scenario['spacing']}m_age_{scenario['age']}yrs"
+
+            # Add to settings for use by caching system
+            settings = settings.copy()  # Don't modify original settings
+            settings['case_name'] = case_name
+            settings['variable'] = variable  # Also add variable name for cache
 
             # Get extraction method from settings (default to slice_2d for backward compatibility)
             extraction_method = settings.get('extraction_method', 'slice_2d')
@@ -1759,7 +2954,7 @@ class TerrainTransectPlotter(BasePlotter):
 
                 transect_values, coordinates, var_name, needs_conversion = \
                     self._extract_terrain_following_transect_direct(
-                        dataset, static_dataset, domain, z_offset,
+                        dataset, static_dataset, domain, variable, z_offset,
                         transect_axis, transect_location, transect_width, settings
                     )
 
@@ -1803,7 +2998,7 @@ class TerrainTransectPlotter(BasePlotter):
                     # 1D transect output (more memory efficient)
                     transect_values, coordinates, var_name, needs_conversion = \
                         self._extract_terrain_following(
-                            dataset, static_dataset, domain, buildings_mask, '1d',
+                            dataset, static_dataset, domain, variable, buildings_mask, '1d',
                             transect_axis, transect_location, transect_width, settings
                         )
 
@@ -1830,7 +3025,7 @@ class TerrainTransectPlotter(BasePlotter):
                     # 2D full field output (provides spatial context)
                     slice_2d, var_name, needs_conversion = \
                         self._extract_terrain_following(
-                            dataset, static_dataset, domain, buildings_mask, '2d',
+                            dataset, static_dataset, domain, variable, buildings_mask, '2d',
                             settings=settings
                         )
 
@@ -1868,7 +3063,7 @@ class TerrainTransectPlotter(BasePlotter):
 
                 # Extract terrain-following slice (ALREADY TIME-AVERAGED using xarray)
                 slice_2d, var_name, needs_conversion = self._extract_terrain_following_slice(
-                    dataset, static_dataset, domain, z_offset, settings
+                    dataset, static_dataset, domain, variable, z_offset, settings
                 )
 
                 # NOTE: Time averaging is done INSIDE _extract_terrain_following_slice()
@@ -1955,15 +3150,37 @@ class TerrainTransectPlotter(BasePlotter):
             print(msg)
             self.logger.info(msg)
 
-        # Determine variable properties
-        if variable == 'ta':
-            var_label = 'Air Temperature (°C)'
-            var_range_config = settings.get('temperature_range', [24.0, 28.6])
-            cmap = settings.get('temperature_cmap', 'RdBu_r')
-        else:  # qv
-            var_label = 'Water Vapor Mixing Ratio (kg/kg-1)'
-            var_range_config = settings.get('qv_range', [0.00081, 0.00095])
-            cmap = settings.get('qv_cmap', 'YlGnBu')
+        # Determine variable properties from metadata system
+        if self.var_metadata:
+            try:
+                var_config = self.var_metadata.get_variable_config(variable)
+                var_display_name = var_config.get('label', variable.replace('_', ' ').title())
+                var_units = var_config.get('units_out', '')
+                var_label = f"{var_display_name} ({var_units})" if var_units else var_display_name
+                var_range_config = var_config.get('value_range', 'auto')
+                cmap = var_config.get('colormap', 'viridis')
+                self.logger.info(f"Using metadata for variable '{variable}': label='{var_label}', range={var_range_config}, cmap={cmap}")
+            except KeyError:
+                # Fallback if variable not in metadata
+                self.logger.warning(f"Variable '{variable}' not found in metadata, using legacy defaults")
+                if variable == 'ta':
+                    var_label = 'Air Temperature (°C)'
+                    var_range_config = settings.get('temperature_range', [24.0, 28.6])
+                    cmap = settings.get('temperature_cmap', 'RdBu_r')
+                else:
+                    var_label = variable.replace('_', ' ').title()
+                    var_range_config = 'auto'
+                    cmap = 'viridis'
+        else:
+            # No metadata system available - use legacy hardcoded logic
+            if variable == 'ta':
+                var_label = 'Air Temperature (°C)'
+                var_range_config = settings.get('temperature_range', [24.0, 28.6])
+                cmap = settings.get('temperature_cmap', 'RdBu_r')
+            else:  # qv
+                var_label = 'Water Vapor Mixing Ratio (kg/kg-1)'
+                var_range_config = settings.get('qv_range', [0.00081, 0.00095])
+                cmap = settings.get('qv_cmap', 'YlGnBu')
 
         # Get domain resolution for x-axis conversion
         if domain == 'parent':
@@ -2110,9 +3327,18 @@ class TerrainTransectPlotter(BasePlotter):
         ax_transect.legend(loc='best', framealpha=0.9)
         ax_transect.grid(True, alpha=0.3)
 
-        # Create title
+        # Create title using variable display name from metadata
         domain_str = domain.capitalize()
-        var_str = 'Air Temperature' if variable == 'ta' else 'Water Vapor Mixing Ratio'
+        # Use the display name extracted from metadata (or fallback)
+        if self.var_metadata:
+            try:
+                var_config = self.var_metadata.get_variable_config(variable)
+                var_str = var_config.get('label', variable.replace('_', ' ').title())
+            except KeyError:
+                var_str = variable.replace('_', ' ').title()
+        else:
+            var_str = 'Air Temperature' if variable == 'ta' else variable.replace('_', ' ').title()
+
         comp_str = 'Tree Ages' if comparison_type == 'age' else 'Tree Spacing'
         title = f'THF Forest Spacing {domain_str} - {comp_str} - {var_str} Average Transect'
         ax_transect.set_title(title, fontsize=14, fontweight='bold')
