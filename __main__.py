@@ -7,6 +7,11 @@ Author: Joshua Brook-Lawson
 Institution: University of Bath
 """
 
+# Set matplotlib backend BEFORE any other imports
+# Use 'Agg' (non-interactive) to prevent tkinter crashes in headless/non-GUI environments
+import matplotlib
+matplotlib.use('Agg')
+
 import os
 import sys
 import argparse

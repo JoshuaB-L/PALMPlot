@@ -24,8 +24,8 @@ data:
   lad_wad_data_path: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/input/output_single_tree_2m/LAD_WAD_grid_data_2m_gridv2_002_with_wad.csv"
 
   # Scenarios to load - must include all scenarios used in plot settings below
-  spacings: [10, 15]    # Reduced for testing
-  ages: [20, 40]        # Reduced for testing
+  spacings: [10, 15, 20, 25]    # Reduced for testing
+  ages: [20, 40, 60, 80]        # Reduced for testing
 
   # Domain settings
   domains:
@@ -296,7 +296,7 @@ data:
 # Output Settings
 output:
   base_directory: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/results/terrain_following_test"
-  formats: ["png"]  # PNG only for testing
+  formats: ["svg"]  # SVG format for better scalability
   dpi: 150  # Lower DPI for faster testing
   transparent_background: false
 
@@ -340,20 +340,23 @@ plots:
 
       # ===== VARIABLE SELECTION =====
       # List of variables to plot (from data.variables section)
-      variables: ["temperature", "utci", "relative_humidity", "radiation_net"]
+      variables: ["temperature", "utci", "relative_humidity", "radiation_net", "humidity_q", 
+                  "wind_speed", "potential_temperature", "pressure", "turbulence_intensity",
+                  "surface_temperature", "sensible_heat_flux", "ground_heat_flux",  "radiation_sw_in",
+                  "radiation_sw_out", "radiation_lw_in", "radiation_lw_out", "humidity_qv"]
 
       # ===== PLOT MATRIX CONFIGURATION =====
       # Define which domain and comparison combinations to generate
       plot_matrix:
-        domains: ["child"]
+        domains: ["child", "parent"]
         comparisons: ["age"]
 
-      # ===== PER-VARIABLE OVERRIDES =====
-      # Optionally restrict specific variables to certain domains or comparisons
-      variable_overrides:
-        utci:
-          domains: ["child"]  # UTCI only for child domain (2m resolution)
-          comparisons: ["age"]  # Only age comparison for UTCI
+#      # ===== PER-VARIABLE OVERRIDES =====
+#      # Optionally restrict specific variables to certain domains or comparisons
+#      variable_overrides:
+#        utci:
+#          domains: ["child"]  # UTCI only for child domain (2m resolution)
+#          comparisons: ["age"]  # Only age comparison for UTCI
 
 #        radiation_net:
 #          comparisons: ["age"]  # Only age comparison for radiation
@@ -397,14 +400,15 @@ plots:
           # These apply to both parent and child domains unless overridden below
           # (Can be omitted here if specified in main settings block above)
 
-#          # ===== DOMAIN-SPECIFIC OVERRIDES =====
-#          parent:
-#            start_z_index: 0     # Start from zu_3d[0] (~0m)
-#            max_z_index: 10      # Stop at zu_3d[10] (~95m for parent)
-#            transect_axis: "x"   # Can override transect axis per domain
-#            transect_location: 200  # Can override transect location per domain
-#            transect_width: 0    # Can override averaging width per domain
-#            transect_z_offset: 1  # Example: Extract 2 levels above terrain base
+          # ===== DOMAIN-SPECIFIC OVERRIDES =====
+          parent:
+            start_z_index: 0     # Start from zu_3d[0] (~0m)
+            max_z_index: 10      # Stop at zu_3d[10] (~95m for parent)
+            transect_axis: "x"   # Can override transect axis per domain
+            transect_location: 200  # Can override transect location per domain
+            transect_width: 0 
+            transect_visualization_width: 35   # Can override averaging width per domain
+            transect_z_offset: 0  # Example: Extract 2 levels above terrain base
                                     # (e.g., if base is zu_3d[1]=5m, extract zu_3d[3]=25m)
 
           # Child domain (2m resolution, 200×200m)
@@ -414,7 +418,9 @@ plots:
             transect_axis: "x"   # Same as parent, but can be different
             transect_location: 100  # Middle of child domain
             transect_width: 0    # No averaging
-            transect_z_offset: 5  # TEST: Extract 3 levels above terrain base
+            transect_visualization_width: 35  # Crop 2D slice to ±20 grid cells around transect line
+                                               # Set to null or omit for no cropping (full domain)
+            transect_z_offset: 0  # TEST: Extract 3 levels above terrain base
                                     # (e.g., if base is zu_3d[11]=21m, extract zu_3d[14]=26m)
 
           # ===== MASK CACHING SETTINGS (NEW FEATURE) =====
@@ -440,14 +446,14 @@ plots:
               # Maximum number of ku_above_surf levels to store
               # Should accommodate all offsets you plan to use
               # Example: If max offset is 10, set to 15-20 for safety margin
-              max_levels: 15
+              max_levels: 10
 
               # Which offset levels to compute and save
               # Options:
               #   - List of integers: [1, 2, 5, 10]
               #   - String "range(start, end)": Python range notation
               # NOTE: More levels = larger files but more flexibility
-              offsets: [0]  # Common offsets for testing
+              offsets: [1, 2, 5, 10]  # Common offsets for testing
 
             # ===== PER-DOMAIN VARIABLE CONTROL (NEW) =====
             # Specify which variables to cache for each domain independently
@@ -459,7 +465,7 @@ plots:
               #   - List: ["temperature", "relative_humidity", "humidity_q"] for specific variables
               # NOTE: Only variables with terrain_following: true are cached
               # NOTE: XY surface variables (file_type: av_xy) are NOT cached
-              variables: #["temperature", "relative_humidity", "humidity_q"]
+              variables: "auto"
 
             child:
               # Variables to cache for child domain (3D atmospheric variables only)
@@ -551,8 +557,8 @@ plots:
 
         # Scenario comparisons
         age_comparison:
-          constant_spacing: [10]              # meters
-          varying_ages: [20]              # years (reduced for testing)
+          constant_spacing: [10, 15, 20, 25]              # meters - MUST MATCH data.spacings above
+          varying_ages: [20, 40, 60, 80]                  # years - MUST MATCH data.ages above
 #        spacing_comparison:
 #          constant_age: [20]              # years (reduced for testing)
 #          varying_spacings: [10]          # meters (reduced for testing)
