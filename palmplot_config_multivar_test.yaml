@@ -159,6 +159,239 @@ data:
       label: "Turbulence Intensity"
       terrain_following: true
 
+    # Wind components
+    wind_u:
+      palm_name: "u"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "m/s"
+      units_out: "m/s"
+      conversion: "none"
+      colormap: "RdBu_r"
+      value_range: "auto"
+      label: "U-component Wind"
+      terrain_following: true
+
+    wind_v:
+      palm_name: "v"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "m/s"
+      units_out: "m/s"
+      conversion: "none"
+      colormap: "RdBu_r"
+      value_range: "auto"
+      label: "V-component Wind"
+      terrain_following: true
+
+    wind_w:
+      palm_name: "w"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "m/s"
+      units_out: "m/s"
+      conversion: "none"
+      colormap: "RdBu_r"
+      value_range: "auto"
+      label: "W-component Wind"
+      terrain_following: true
+
+    # Turbulent kinetic energy
+    tke:
+      palm_name: "e"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "m2/s2"
+      units_out: "m2/s2"
+      conversion: "none"
+      colormap: "YlOrRd"
+      value_range: "auto"
+      label: "Turbulent Kinetic Energy"
+      terrain_following: true
+
+    # ===== SOIL VARIABLES (zs_3d coordinate - 8 levels) =====
+    soil_moisture:
+      palm_name: "m_soil"
+      file_type: "av_3d"
+      z_coordinate: "zs_3d"
+      units_in: "m3/m3"
+      units_out: "m3/m3"
+      conversion: "none"
+      colormap: "YlGnBu"
+      value_range: "auto"
+      label: "Soil Moisture"
+      terrain_following: false
+
+    soil_temperature:
+      palm_name: "t_soil"
+      file_type: "av_3d"
+      z_coordinate: "zs_3d"
+      units_in: "K"
+      units_out: "degC"
+      conversion: "kelvin_to_celsius"
+      colormap: "RdYlBu_r"
+      value_range: "auto"
+      label: "Soil Temperature"
+      terrain_following: false
+
+    # ===== PLANT CANOPY MODEL VARIABLES (zpc_3d coordinate - 15 levels) =====
+    pcm_transpirationrate:
+      palm_name: "pcm_transpirationrate"
+      file_type: "av_3d"
+      z_coordinate: "zpc_3d"
+      units_in: "kg/kg/s"
+      units_out: "kg/kg/s"
+      conversion: "none"
+      colormap: "YlGnBu"
+      value_range: "auto"
+      label: "PCM Transpiration Rate"
+      terrain_following: true
+
+    pcm_transpirationvolume:
+      palm_name: "pcm_transpirationvolume"
+      file_type: "av_3d"
+      z_coordinate: "zpc_3d"
+      units_in: "m3/m3/s"
+      units_out: "m3/m3/s"
+      conversion: "none"
+      colormap: "YlGnBu"
+      value_range: "auto"
+      label: "PCM Transpiration Volume"
+      terrain_following: true
+
+    pcm_transpirationvolume_pot:
+      palm_name: "pcm_transpirationvolume_pot"
+      file_type: "av_3d"
+      z_coordinate: "zpc_3d"
+      units_in: "m3/m3/s"
+      units_out: "m3/m3/s"
+      conversion: "none"
+      colormap: "YlGnBu"
+      value_range: "auto"
+      label: "PCM Potential Transpiration Volume"
+      terrain_following: true
+
+    pcm_heatrate:
+      palm_name: "pcm_heatrate"
+      file_type: "av_3d"
+      z_coordinate: "zpc_3d"
+      units_in: "K/s"
+      units_out: "K/s"
+      conversion: "none"
+      colormap: "RdYlBu_r"
+      value_range: "auto"
+      label: "PCM Heat Rate"
+      terrain_following: true
+
+    pcm_latentrate:
+      palm_name: "pcm_latentrate"
+      file_type: "av_3d"
+      z_coordinate: "zpc_3d"
+      units_in: "K/s"
+      units_out: "K/s"
+      conversion: "none"
+      colormap: "RdYlBu_r"
+      value_range: "auto"
+      label: "PCM Latent Heat Rate"
+      terrain_following: true
+
+    # ===== RADIATION TRANSFER MODEL VARIABLES (zu_3d coordinate) =====
+    rtm_rad_pc_insw:
+      palm_name: "rtm_rad_pc_insw"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "W/m3"
+      units_out: "W/m3"
+      conversion: "none"
+      colormap: "YlOrRd"
+      value_range: "auto"
+      label: "RTM Absorbed Shortwave Radiation"
+      terrain_following: true
+
+    rtm_rad_pc_inlw:
+      palm_name: "rtm_rad_pc_inlw"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "W/m3"
+      units_out: "W/m3"
+      conversion: "none"
+      colormap: "Reds"
+      value_range: "auto"
+      label: "RTM Absorbed Longwave Radiation"
+      terrain_following: true
+
+    rtm_rad_pc_inswdir:
+      palm_name: "rtm_rad_pc_inswdir"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "W/m3"
+      units_out: "W/m3"
+      conversion: "none"
+      colormap: "YlOrRd"
+      value_range: "auto"
+      label: "RTM Direct Shortwave Radiation"
+      terrain_following: true
+
+    rtm_rad_pc_inswdif:
+      palm_name: "rtm_rad_pc_inswdif"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "W/m3"
+      units_out: "W/m3"
+      conversion: "none"
+      colormap: "YlOrRd"
+      value_range: "auto"
+      label: "RTM Diffuse Shortwave Radiation"
+      terrain_following: true
+
+    rtm_rad_pc_inswref:
+      palm_name: "rtm_rad_pc_inswref"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "W/m3"
+      units_out: "W/m3"
+      conversion: "none"
+      colormap: "YlOrRd"
+      value_range: "auto"
+      label: "RTM Reflected Shortwave Radiation"
+      terrain_following: true
+
+    rtm_mrt:
+      palm_name: "rtm_mrt"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "K"
+      units_out: "degC"
+      conversion: "kelvin_to_celsius"
+      colormap: "RdYlBu_r"
+      value_range: "auto"
+      label: "Mean Radiant Temperature"
+      terrain_following: true
+
+    rtm_mrt_lw:
+      palm_name: "rtm_mrt_lw"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "W/m2"
+      units_out: "W/m2"
+      conversion: "none"
+      colormap: "Reds"
+      value_range: "auto"
+      label: "MRT Longwave Component"
+      terrain_following: true
+
+    rtm_mrt_sw:
+      palm_name: "rtm_mrt_sw"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "W/m2"
+      units_out: "W/m2"
+      conversion: "none"
+      colormap: "YlOrRd"
+      value_range: "auto"
+      label: "MRT Shortwave Component"
+      terrain_following: true
+
     # ===== XY SURFACE VARIABLES (from av_xy files) =====
     # Note: terrain_following=false means extract surface directly without terrain logic
 
@@ -293,6 +526,124 @@ data:
       label: "Ground Heat Flux"
       terrain_following: false
 
+    # Additional surface variables
+    wspeed_10m:
+      palm_name: "wspeed_10m*_xy"
+      file_type: "av_xy"
+      z_coordinate: "zu1_xy"
+      wildcard: true
+      units_in: "m/s"
+      units_out: "m/s"
+      conversion: "none"
+      colormap: "YlOrRd"
+      value_range: "auto"
+      label: "Wind Speed at 10m"
+      terrain_following: false
+
+    theta_2m:
+      palm_name: "theta_2m*_xy"
+      file_type: "av_xy"
+      z_coordinate: "zu1_xy"
+      wildcard: true
+      units_in: "K"
+      units_out: "degC"
+      conversion: "kelvin_to_celsius"
+      colormap: "RdBu_r"
+      value_range: "auto"
+      label: "Potential Temperature at 2m"
+      terrain_following: false
+
+    friction_velocity:
+      palm_name: "us*_xy"
+      file_type: "av_xy"
+      z_coordinate: "zu1_xy"
+      wildcard: true
+      units_in: "m/s"
+      units_out: "m/s"
+      conversion: "none"
+      colormap: "YlOrRd"
+      value_range: "auto"
+      label: "Friction Velocity"
+      terrain_following: false
+
+    roughness_length:
+      palm_name: "z0*_xy"
+      file_type: "av_xy"
+      z_coordinate: "zu1_xy"
+      wildcard: true
+      units_in: "m"
+      units_out: "m"
+      conversion: "none"
+      colormap: "viridis"
+      value_range: "auto"
+      label: "Roughness Length"
+      terrain_following: false
+
+    obukhov_length:
+      palm_name: "ol*_xy"
+      file_type: "av_xy"
+      z_coordinate: "zu1_xy"
+      wildcard: true
+      units_in: "m"
+      units_out: "m"
+      conversion: "none"
+      colormap: "RdBu_r"
+      value_range: "auto"
+      label: "Obukhov Length"
+      terrain_following: false
+
+    liquid_water_content:
+      palm_name: "m_liq*_xy"
+      file_type: "av_xy"
+      z_coordinate: "zu1_xy"
+      wildcard: true
+      units_in: "m"
+      units_out: "m"
+      conversion: "none"
+      colormap: "YlGnBu"
+      value_range: "auto"
+      label: "Liquid Water Content"
+      terrain_following: false
+
+    surface_resistance:
+      palm_name: "r_s*_xy"
+      file_type: "av_xy"
+      z_coordinate: "zu1_xy"
+      wildcard: true
+      units_in: "s/m"
+      units_out: "s/m"
+      conversion: "none"
+      colormap: "viridis"
+      value_range: "auto"
+      label: "Surface Resistance"
+      terrain_following: false
+
+    aerodynamic_resistance:
+      palm_name: "r_a*_xy"
+      file_type: "av_xy"
+      z_coordinate: "zu1_xy"
+      wildcard: true
+      units_in: "s/m"
+      units_out: "s/m"
+      conversion: "none"
+      colormap: "viridis"
+      value_range: "auto"
+      label: "Aerodynamic Resistance"
+      terrain_following: false
+
+    surface_moisture_flux:
+      palm_name: "qsws*_xy"
+      file_type: "av_xy"
+      z_coordinate: "zu1_xy"
+      wildcard: true
+      units_in: "W/m2"
+      units_out: "W/m2"
+      conversion: "none"
+      colormap: "YlGnBu"
+      value_range: "auto"
+      label: "Surface Moisture Flux"
+      terrain_following: false
+
 # Output Settings
 output:
   base_directory: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/results/terrain_following_test"
@@ -340,10 +691,38 @@ plots:
 
       # ===== VARIABLE SELECTION =====
       # List of variables to plot (from data.variables section)
-      variables: ["temperature", "utci", "relative_humidity", "radiation_net", "humidity_q", 
-                  "wind_speed", "potential_temperature", "pressure", "turbulence_intensity",
-                  "surface_temperature", "sensible_heat_flux", "ground_heat_flux",  "radiation_sw_in",
-                  "radiation_sw_out", "radiation_lw_in", "radiation_lw_out", "humidity_qv"]
+      # NOTE: Processing all 47 variables is very resource-intensive!
+      # Recommended: Start with subset, verify cache merge, then add more
+
+      # Current selection (23 variables - atmospheric + surface + PCM basics)
+#      variables: ["temperature", "utci", "relative_humidity", "radiation_net", "humidity_q",
+#                  "wind_speed", "potential_temperature", "pressure", "turbulence_intensity",
+#                  "surface_temperature", "sensible_heat_flux", "ground_heat_flux",  "radiation_sw_in",
+#                  "radiation_sw_out", "radiation_lw_in", "radiation_lw_out", "humidity_qv",
+#                  "wind_u", "wind_v", "wind_w", "tke",
+#                  "pcm_heatrate", "rtm_mrt"]
+
+      variables: ["pcm_heatrate", "pcm_transpirationrate", 
+                  "pcm_transpirationvolume", "pcm_latentrate"]                  
+
+      # Additional variables available (add to list above as needed):
+      # --- Soil variables (zs_3d - 8 layers) ---
+      #   "soil_moisture", "soil_temperature"
+      #
+      # --- Plant Canopy Model variables (zpc_3d - 15 layers) ---
+      #   "pcm_transpirationrate", "pcm_transpirationvolume",
+      #   "pcm_transpirationvolume_pot", "pcm_latentrate"
+      #
+      # --- Radiation Transfer Model variables (zu_3d) ---
+      #   "rtm_rad_pc_insw", "rtm_rad_pc_inlw", "rtm_rad_pc_inswdir",
+      #   "rtm_rad_pc_inswdif", "rtm_rad_pc_inswref", "rtm_mrt_lw", "rtm_mrt_sw"
+      #
+      # --- Additional surface variables (av_xy) ---
+      #   "wspeed_10m", "theta_2m", "friction_velocity", "roughness_length",
+      #   "obukhov_length", "liquid_water_content", "surface_resistance",
+      #   "aerodynamic_resistance", "surface_moisture_flux"
+      #
+      # Total: 47 variables available (28 av_3d + 19 av_xy)
 
       # ===== PLOT MATRIX CONFIGURATION =====
       # Define which domain and comparison combinations to generate
@@ -406,7 +785,7 @@ plots:
             max_z_index: 10      # Stop at zu_3d[10] (~95m for parent)
             transect_axis: "x"   # Can override transect axis per domain
             transect_location: 200  # Can override transect location per domain
-            transect_width: 0 
+            transect_width: 10 
             transect_visualization_width: 35   # Can override averaging width per domain
             transect_z_offset: 0  # Example: Extract 2 levels above terrain base
                                     # (e.g., if base is zu_3d[1]=5m, extract zu_3d[3]=25m)
@@ -453,7 +832,7 @@ plots:
               #   - List of integers: [1, 2, 5, 10]
               #   - String "range(start, end)": Python range notation
               # NOTE: More levels = larger files but more flexibility
-              offsets: [1, 2, 5, 10]  # Common offsets for testing
+              offsets: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]  # Common offsets for testing
 
             # ===== PER-DOMAIN VARIABLE CONTROL (NEW) =====
             # Specify which variables to cache for each domain independently

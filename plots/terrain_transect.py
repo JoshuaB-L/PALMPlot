@@ -1620,22 +1620,44 @@ class TerrainTransectPlotter(BasePlotter):
             is_2d_surface = False
             z_dim = None
 
-            # Check for 3D atmospheric dimensions (zu_3d, zw_3d)
-            if 'zu_3d' in var_data.dims:
-                z_dim = 'zu_3d'
-                is_2d_surface = False
-            elif 'zw_3d' in var_data.dims:
-                z_dim = 'zw_3d'
-                is_2d_surface = False
-            # Check for 2D surface dimensions (zu1_xy, zu_xy)
-            elif 'zu1_xy' in var_data.dims:
-                z_dim = 'zu1_xy'
-                is_2d_surface = True
-            elif 'zu_xy' in var_data.dims:
-                z_dim = 'zu_xy'
-                is_2d_surface = True
-            else:
-                # Check if already 2D (time, y, x)
+            # DYNAMIC Z-COORDINATE DETECTION: Use VariableMetadata for flexibility
+            # This supports ALL coordinate types: zu_3d, zw_3d, zs_3d, zpc_3d, zu1_xy, zu_xy
+
+            # Get expected z-coordinate from metadata (if available)
+            expected_z_coord = None
+            if self.var_metadata:
+                try:
+                    expected_z_coord = self.var_metadata.get_z_coordinate(variable)
+                    msg = f"  Expected z-coordinate from metadata: {expected_z_coord}"
+                    print(msg)
+                    self.logger.info(msg)
+                except KeyError:
+                    self.logger.warning(f"No z-coordinate found in metadata for '{variable}'")
+
+            # Check for the expected coordinate first, then fallback to known types
+            possible_z_dims = []
+            if expected_z_coord:
+                possible_z_dims.append(expected_z_coord)
+
+            # Add fallback coordinates in priority order
+            # 3D atmospheric/canopy/soil coordinates
+            possible_z_dims.extend(['zu_3d', 'zw_3d', 'zs_3d', 'zpc_3d'])
+            # 2D surface coordinates
+            possible_z_dims.extend(['zu1_xy', 'zu_xy'])
+
+            # Find which coordinate exists in the data
+            for coord in possible_z_dims:
+                if coord in var_data.dims:
+                    z_dim = coord
+                    # Determine if 2D surface based on coordinate name
+                    is_2d_surface = coord in ['zu1_xy', 'zu_xy']
+                    msg = f"  Detected z-coordinate: {z_dim} ({'2D surface' if is_2d_surface else '3D atmospheric/soil/canopy'})"
+                    print(msg)
+                    self.logger.info(msg)
+                    break
+
+            # If no z-dimension found, check if already 2D (time, y, x)
+            if z_dim is None:
                 if len(var_data.dims) == 3 and 'time' in var_data.dims:
                     is_2d_surface = True
                     z_dim = None
@@ -1647,18 +1669,41 @@ class TerrainTransectPlotter(BasePlotter):
                     raise ValueError(
                         f"Could not find recognized vertical dimension in variable '{var_name_found}'. "
                         f"Available dimensions: {available_dims}. "
-                        f"Expected: zu_3d, zw_3d, zu1_xy, or zu_xy"
+                        f"Expected: {', '.join(possible_z_dims)}"
                     )
 
-            # Handle 2D surface variables differently (NO terrain-following)
-            if is_2d_surface:
-                msg = f"\n=== SURFACE VARIABLE DETECTED (2D) ==="
-                print(msg)
-                self.logger.info(msg)
-                msg = f"  Variable '{var_name_found}' is a surface variable (file_type: av_xy)"
-                print(msg)
-                self.logger.info(msg)
-                msg = f"  Skipping terrain-following extraction, using surface level directly"
+            # Check if variable requires terrain-following (from metadata)
+            requires_terrain_following = True  # Default to True
+            if self.var_metadata:
+                try:
+                    requires_terrain_following = self.var_metadata.requires_terrain_following(variable)
+                    msg = f"  Terrain-following required (from metadata): {requires_terrain_following}"
+                    print(msg)
+                    self.logger.info(msg)
+                except (KeyError, AttributeError):
+                    self.logger.warning(f"Could not determine terrain-following requirement for '{variable}', defaulting to True")
+
+            # Handle non-terrain-following variables (2D surface OR 3D soil/other with terrain_following=false)
+            if is_2d_surface or not requires_terrain_following:
+                if is_2d_surface:
+                    msg = f"\n=== 2D SURFACE VARIABLE (av_xy) ==="
+                    print(msg)
+                    self.logger.info(msg)
+                    msg = f"  Variable '{var_name_found}' is a 2D surface variable"
+                    print(msg)
+                    self.logger.info(msg)
+                else:
+                    msg = f"\n=== 3D VARIABLE WITHOUT TERRAIN-FOLLOWING (e.g., soil) ==="
+                    print(msg)
+                    self.logger.info(msg)
+                    msg = f"  Variable '{var_name_found}' has {z_dim} coordinate but terrain_following=false"
+                    print(msg)
+                    self.logger.info(msg)
+                    msg = f"  Will extract specific level (e.g., top soil layer) instead of terrain-following"
+                    print(msg)
+                    self.logger.info(msg)
+
+                msg = f"  Skipping terrain-following extraction"
                 print(msg)
                 self.logger.info(msg)
 
