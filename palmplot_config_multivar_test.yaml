@@ -775,9 +775,75 @@ plots:
           # Useful for analyzing conditions at a fixed height above variable terrain
           transect_z_offset: null  # Disabled by default
 
+          # ===== PCM (PLANT CANOPY MODEL) TRANSECT Z-OFFSET =====
+          # Separate offset system for PCM variables (those using zpc_3d coordinate)
+          # PCM variables represent 3D canopy masks (e.g., transpiration, heat rates)
+          # that only exist where Leaf Area Density (LAD) is present
+          #
+          # PROBLEM: Using regular transect_z_offset extracts different relative canopy
+          # positions for different tree ages (20, 40, 60, 80 years) because canopy
+          # heights vary significantly.
+          #
+          # SOLUTION: PCM-specific modes that account for canopy structure:
+          pcm_transect_z_offset:
+            # Enable/disable PCM-specific extraction
+            enabled: true  # Set to true to enable PCM extraction
+
+            # Extraction mode (mutually exclusive - choose ONE approach):
+            #
+            # GLOBAL MODES (apply same strategy to all tree ages):
+            #   - "upper": Extract upper third of canopy at each position
+            #   - "middle": Extract middle third of canopy at each position
+            #   - "lower": Extract lower third of canopy at each position
+            #   - "mean": Average all canopy layers at each position
+            #   - Multiple: ["upper", "middle"] - plots multiple lines per case
+            #
+            # INDIVIDUAL MODE (age-specific offsets):
+            #   - "individual": Specify exact grid cell offsets per age group per domain
+            #
+            # Example configurations:
+            #   mode: "upper"                 # Single global mode
+            #   mode: ["upper", "middle"]     # Multiple global modes
+            #   mode: "individual"            # Age-specific mode
+            mode: "mean"
+
+            # Individual mode configuration (only used if mode: "individual")
+            # Specify grid cell offsets from canopy base for each age group
+            # Structure: domain → age → offset (in grid cells)
+            individual:
+              parent:
+                20yrs: 2   # 20-year trees: extract 2 cells above base
+                40yrs: 4   # 40-year trees: extract 4 cells above base
+                60yrs: 6   # 60-year trees: extract 6 cells above base
+                80yrs: 8   # 80-year trees: extract 8 cells above base
+              child:
+                20yrs: 3   # Child domain may need different offsets (2m vs 10m resolution)
+                40yrs: 5
+                60yrs: 7
+                80yrs: 9
+
+            # Cache storage mode (optional, for future cache integration)
+            # - "averaged": Store layer-averaged values (compact, 3-4 levels)
+            # - "full_resolution": Store all individual zpc_3d levels used
+            cache_storage: "averaged"
+
           # Global defaults for transect settings
           # These apply to both parent and child domains unless overridden below
           # (Can be omitted here if specified in main settings block above)
+
+          # ===== 2D MAP VISUALIZATION SETTINGS =====
+          # Select which scenario to display in the 2D colormap (bottom panel)
+          # Options:
+          #   - "first": Use first scenario in list (default, typically base case)
+          #   - "last": Use last scenario in list
+          #   - Specific label: e.g., "10m 80yrs", "15m 60yrs", "No Trees", etc.
+          #
+          # Examples:
+          #   map_display_scenario: "first"        # Show base case (default)
+          #   map_display_scenario: "10m 80yrs"    # Show 10m spacing, 80-year trees
+          #   map_display_scenario: "25m 20yrs"    # Show 25m spacing, 20-year trees
+          #   map_display_scenario: "last"         # Show last scenario in list
+          map_display_scenario: "10m 80yrs"  # Show 80-year-old trees with 10m spacing
 
           # ===== DOMAIN-SPECIFIC OVERRIDES =====
           parent:
@@ -796,7 +862,7 @@ plots:
             max_z_index: 25      # Stop at zu_3d[20] (~40m for child, similar coverage)
             transect_axis: "x"   # Same as parent, but can be different
             transect_location: 100  # Middle of child domain
-            transect_width: 0    # No averaging
+            transect_width: 10    # No averaging
             transect_visualization_width: 35  # Crop 2D slice to ±20 grid cells around transect line
                                                # Set to null or omit for no cropping (full domain)
             transect_z_offset: 0  # TEST: Extract 3 levels above terrain base

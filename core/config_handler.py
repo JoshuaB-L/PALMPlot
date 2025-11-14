@@ -403,6 +403,19 @@ class ConfigHandler:
                     f"({transect_z_offset}). This may result in out-of-bounds errors."
                 )
 
+        # Validate map_display_scenario (optional)
+        map_display_scenario = tf_settings.get('map_display_scenario', 'first')
+        if map_display_scenario is not None:
+            if not isinstance(map_display_scenario, str):
+                raise ValueError(
+                    f"{item_id}: terrain_following.map_display_scenario must be string, "
+                    f"got {type(map_display_scenario).__name__}"
+                )
+            # Log the configured setting
+            self.logger.debug(
+                f"{item_id}: 2D map will display scenario: '{map_display_scenario}'"
+            )
+
         # Validate domain-specific settings if present
         for domain in ['parent', 'child']:
             if domain not in tf_settings:
@@ -486,6 +499,142 @@ class ConfigHandler:
             self.logger.debug(
                 f"{item_id}: Domain-specific terrain-following settings validated for '{domain}'"
             )
+
+        # Validate PCM transect_z_offset settings (optional)
+        if 'pcm_transect_z_offset' in tf_settings:
+            pcm_config = tf_settings['pcm_transect_z_offset']
+
+            if not isinstance(pcm_config, dict):
+                raise ValueError(
+                    f"{item_id}: terrain_following.pcm_transect_z_offset must be a dictionary"
+                )
+
+            # Validate enabled flag
+            pcm_enabled = pcm_config.get('enabled', False)
+            if not isinstance(pcm_enabled, bool):
+                raise ValueError(
+                    f"{item_id}: terrain_following.pcm_transect_z_offset.enabled must be boolean"
+                )
+
+            if pcm_enabled:
+                # Validate mode setting
+                if 'mode' not in pcm_config:
+                    raise ValueError(
+                        f"{item_id}: terrain_following.pcm_transect_z_offset.mode is required when enabled=true"
+                    )
+
+                mode = pcm_config['mode']
+                valid_modes = ['upper', 'middle', 'lower', 'mean', 'individual']
+
+                # Mode can be single string or list
+                if isinstance(mode, str):
+                    mode_list = [mode]
+                elif isinstance(mode, list):
+                    mode_list = mode
+                    if len(mode_list) == 0:
+                        raise ValueError(
+                            f"{item_id}: terrain_following.pcm_transect_z_offset.mode list cannot be empty"
+                        )
+                else:
+                    raise ValueError(
+                        f"{item_id}: terrain_following.pcm_transect_z_offset.mode must be string or list, "
+                        f"got {type(mode).__name__}"
+                    )
+
+                # Validate each mode
+                for m in mode_list:
+                    if m not in valid_modes:
+                        raise ValueError(
+                            f"{item_id}: Invalid PCM mode '{m}'. Must be one of: {valid_modes}"
+                        )
+
+                # Check mutual exclusivity: global modes vs individual
+                has_global = any(m in ['upper', 'middle', 'lower', 'mean'] for m in mode_list)
+                has_individual = 'individual' in mode_list
+
+                if has_global and has_individual:
+                    raise ValueError(
+                        f"{item_id}: Cannot mix global modes (upper/middle/lower/mean) with individual mode"
+                    )
+
+                # Validate individual mode settings if present
+                if has_individual:
+                    if 'individual' not in pcm_config:
+                        raise ValueError(
+                            f"{item_id}: terrain_following.pcm_transect_z_offset.individual configuration "
+                            f"required when mode='individual'"
+                        )
+
+                    individual_config = pcm_config['individual']
+                    if not isinstance(individual_config, dict):
+                        raise ValueError(
+                            f"{item_id}: terrain_following.pcm_transect_z_offset.individual must be a dictionary"
+                        )
+
+                    # Validate domain-specific age configurations
+                    for domain in ['parent', 'child']:
+                        if domain not in individual_config:
+                            self.logger.warning(
+                                f"{item_id}: No PCM individual offsets configured for '{domain}' domain. "
+                                f"Extraction will fail for this domain."
+                            )
+                            continue
+
+                        domain_ages = individual_config[domain]
+                        if not isinstance(domain_ages, dict):
+                            raise ValueError(
+                                f"{item_id}: terrain_following.pcm_transect_z_offset.individual.{domain} "
+                                f"must be a dictionary"
+                            )
+
+                        # Validate age entries
+                        valid_ages = ['20yrs', '40yrs', '60yrs', '80yrs']
+                        for age_key, offset_value in domain_ages.items():
+                            # Validate age key format
+                            if age_key not in valid_ages:
+                                self.logger.warning(
+                                    f"{item_id}: PCM age key '{age_key}' not in expected format. "
+                                    f"Expected: {valid_ages}"
+                                )
+
+                            # Validate offset value
+                            if not isinstance(offset_value, int):
+                                raise ValueError(
+                                    f"{item_id}: PCM offset for {domain}.{age_key} must be integer, "
+                                    f"got {type(offset_value).__name__}"
+                                )
+
+                            if offset_value < 0:
+                                raise ValueError(
+                                    f"{item_id}: PCM offset for {domain}.{age_key} must be non-negative, "
+                                    f"got {offset_value}"
+                                )
+
+                            # Warn if offset is very large (PCM has typically 15 levels)
+                            if offset_value > 14:
+                                self.logger.warning(
+                                    f"{item_id}: PCM offset for {domain}.{age_key} is {offset_value}. "
+                                    f"Note: zpc_3d typically has ~15 levels (0-14). "
+                                    f"This may result in out-of-bounds errors."
+                                )
+
+                # Validate cache_storage setting (optional)
+                if 'cache_storage' in pcm_config:
+                    cache_storage = pcm_config['cache_storage']
+                    valid_storage = ['averaged', 'full_resolution']
+                    if cache_storage not in valid_storage:
+                        raise ValueError(
+                            f"{item_id}: terrain_following.pcm_transect_z_offset.cache_storage must be "
+                            f"one of: {valid_storage}, got '{cache_storage}'"
+                        )
+
+                self.logger.debug(
+                    f"{item_id}: PCM transect_z_offset settings validated: enabled=true, mode={mode}"
+                )
+            else:
+                self.logger.debug(
+                    f"{item_id}: PCM transect_z_offset disabled"
+                )
 
         self.logger.debug(
             f"{item_id}: Terrain-following settings validated: output_mode={output_mode}, "

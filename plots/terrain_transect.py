@@ -1389,6 +1389,570 @@ class TerrainTransectPlotter(BasePlotter):
                 return None
 
     # ========================================================================
+    # PCM (Plant Canopy Model) Variable Extraction Methods
+    # ========================================================================
+
+    def _is_pcm_variable(self, variable: str, dataset: xr.Dataset) -> bool:
+        """
+        Detect if a variable is a PCM (Plant Canopy Model) variable.
+
+        PCM variables:
+        - Use zpc_3d vertical coordinate (canopy levels, typically 15 levels)
+        - Represent 3D masks of values only in regions with Leaf Area Density (LAD)
+        - Require special handling for transect extraction across different tree ages
+
+        Args:
+            variable: Variable name (config name like 'pcm_transpirationrate')
+            dataset: xarray Dataset to check
+
+        Returns:
+            bool: True if variable uses zpc_3d coordinate, False otherwise
+        """
+        try:
+            # Quick check: if dataset doesn't have zpc_3d coordinate at all, can't be PCM
+            if 'zpc_3d' not in dataset.coords and 'zpc_3d' not in dataset.dims:
+                self.logger.debug(f"Dataset has no zpc_3d coordinate, skipping PCM detection")
+                return False
+
+            # Use existing variable discovery mechanism
+            var_data, var_name_found = self._find_variable_in_dataset(dataset, variable)
+
+            # Check if variable uses zpc_3d coordinate
+            if 'zpc_3d' in var_data.dims:
+                self.logger.debug(f"Variable '{variable}' identified as PCM variable (uses zpc_3d)")
+                return True
+
+            return False
+
+        except (KeyError, AttributeError) as e:
+            # Variable not found in dataset - common for base case
+            self.logger.debug(f"Variable '{variable}' not found in dataset (likely base case)")
+            return False
+        except Exception as e:
+            self.logger.warning(f"Could not determine if '{variable}' is PCM variable: {e}")
+            return False
+
+    def _stratify_pcm_canopy(self,
+                              var_data: xr.DataArray,
+                              z_dim: str = 'zpc_3d') -> Dict[str, np.ndarray]:
+        """
+        Stratify PCM canopy into upper, middle, and lower layers per grid cell.
+
+        For each horizontal position (x, y), this method:
+        1. Finds the vertical extent of non-NaN values (canopy base to top)
+        2. Divides the extent into three equal layers (lower, middle, upper)
+        3. Handles edge case of fewer than 3 vertical cells
+
+        This per-position stratification accounts for varying canopy heights
+        across different tree ages and spatial locations.
+
+        Args:
+            var_data: xarray DataArray with dimensions (time, zpc_3d, y, x)
+            z_dim: Name of vertical dimension (default: 'zpc_3d')
+
+        Returns:
+            Dictionary with keys:
+                'lower_indices': 3D array [y, x, n_layers] of z-indices for lower third
+                'middle_indices': 3D array [y, x, n_layers] of z-indices for middle third
+                'upper_indices': 3D array [y, x, n_layers] of z-indices for upper third
+                'valid_mask': 2D array [y, x] indicating positions with valid canopy data
+                'layer_counts': Dictionary with 'lower', 'middle', 'upper' counts per position
+        """
+        self.logger.info("Stratifying PCM canopy into upper/middle/lower layers (per-position)")
+
+        # Get dimensions
+        if 'time' in var_data.dims:
+            # Average over time dimension first
+            var_data_mean = var_data.mean(dim='time')
+        else:
+            var_data_mean = var_data
+
+        nz = var_data_mean.sizes[z_dim]
+        ny = var_data_mean.sizes['y']
+        nx = var_data_mean.sizes['x']
+
+        self.logger.info(f"  Canopy dimensions: nz={nz}, ny={ny}, nx={nx}")
+
+        # ===== VECTORIZED APPROACH (MUCH FASTER) =====
+        # Convert to numpy array once (avoid repeated xarray indexing)
+        data_array = var_data_mean.values  # Shape: [nz, ny, nx]
+
+        # ===== CRITICAL FIX: PCM variables have 0.0 instead of NaN where no canopy exists =====
+        # PCM NetCDF files store 0.0 values in regions without trees/canopy
+        # We need to distinguish "no data" (should be NaN) from "actual zero values"
+        # Strategy: Identify positions where ALL vertical layers are zero or near-zero
+        #           These are "no data" positions and should be treated as NaN
+
+        # Threshold for considering a value as "essentially zero" (no data)
+        # PCM variables (heat rates, transpiration) should have meaningful non-zero values in canopy
+        zero_threshold = 1e-10
+
+        # Find positions with meaningful data (not all near-zero)
+        has_significant_data = np.abs(data_array) > zero_threshold  # Shape: [nz, ny, nx]
+        has_any_significant_data = np.any(has_significant_data, axis=0)  # Shape: [ny, nx]
+
+        # Also check for NaN explicitly
+        has_non_nan = ~np.isnan(data_array)  # Shape: [nz, ny, nx]
+        has_any_non_nan = np.any(has_non_nan, axis=0)  # Shape: [ny, nx]
+
+        # Valid positions: have non-NaN AND significant (non-zero) data
+        has_any_data = has_any_significant_data & has_any_non_nan  # Shape: [ny, nx]
+
+        # Replace near-zero values with NaN for cleaner processing
+        # This ensures positions without canopy don't contribute to statistics
+        n_total_cells = nz * ny * nx
+        n_nonzero_before = np.sum(~np.isnan(data_array))
+        data_array = np.where(np.abs(data_array) > zero_threshold, data_array, np.nan)
+        n_nonzero_after = np.sum(~np.isnan(data_array))
+        n_zeros_filtered = n_nonzero_before - n_nonzero_after
+
+        if n_zeros_filtered > 0:
+            self.logger.info(f"  Filtered {n_zeros_filtered} zero/near-zero cells "
+                           f"({100*n_zeros_filtered/n_total_cells:.1f}% of total) "
+                           f"- treating as no-data")
+
+        # Pre-allocate output arrays
+        lower_indices = [[[] for _ in range(nx)] for _ in range(ny)]
+        middle_indices = [[[] for _ in range(nx)] for _ in range(ny)]
+        upper_indices = [[[] for _ in range(nx)] for _ in range(ny)]
+        valid_mask = has_any_data
+
+        # Get positions that have valid data
+        valid_positions = np.argwhere(has_any_data)  # Shape: [n_valid, 2]
+        n_positions_valid = len(valid_positions)
+
+        self.logger.info(f"  Valid canopy coverage: {n_positions_valid}/{ny*nx} positions "
+                        f"({100*n_positions_valid/(ny*nx):.1f}%)")
+
+        # Only process positions with valid data
+        for pos_idx, (iy, ix) in enumerate(valid_positions):
+            # Extract vertical profile (simple numpy array indexing - FAST)
+            profile = data_array[:, iy, ix]
+
+            # Find non-NaN indices
+            valid_z_indices = np.where(~np.isnan(profile))[0]
+
+            if len(valid_z_indices) == 0:
+                continue
+
+            # Get extent: lowest to highest valid index
+            min_z = valid_z_indices[0]
+            max_z = valid_z_indices[-1]
+            n_layers = max_z - min_z + 1
+
+            # Handle stratification based on number of layers
+            if n_layers < 3:
+                # Fewer than 3 layers: assign all to "middle"
+                middle_indices[iy][ix] = valid_z_indices.tolist()
+            else:
+                # Divide into thirds using vectorized comparison
+                layer_third = n_layers / 3.0
+                lower_max = min_z + layer_third
+                middle_max = min_z + 2 * layer_third
+
+                # Vectorized assignment (much faster than loop)
+                lower_mask = valid_z_indices < lower_max
+                middle_mask = (valid_z_indices >= lower_max) & (valid_z_indices < middle_max)
+                upper_mask = valid_z_indices >= middle_max
+
+                lower_indices[iy][ix] = valid_z_indices[lower_mask].tolist()
+                middle_indices[iy][ix] = valid_z_indices[middle_mask].tolist()
+                upper_indices[iy][ix] = valid_z_indices[upper_mask].tolist()
+
+        self.logger.info(f"  Processed {n_positions_valid} positions with valid canopy data")
+
+        # Calculate layer statistics (optimized)
+        n_lower = sum(len(indices) for row in lower_indices for indices in row)
+        n_middle = sum(len(indices) for row in middle_indices for indices in row)
+        n_upper = sum(len(indices) for row in upper_indices for indices in row)
+
+        self.logger.info(f"  Layer cell counts: lower={n_lower}, middle={n_middle}, upper={n_upper}")
+
+        return {
+            'lower_indices': lower_indices,
+            'middle_indices': middle_indices,
+            'upper_indices': upper_indices,
+            'valid_mask': valid_mask,
+            'nz': nz,
+            'ny': ny,
+            'nx': nx
+        }
+
+    def _extract_pcm_global_mode(self,
+                                  dataset: xr.Dataset,
+                                  variable: str,
+                                  modes: Union[str, List[str]],
+                                  z_dim: str = 'zpc_3d') -> Dict[str, np.ndarray]:
+        """
+        Extract PCM variable using global canopy stratification modes.
+
+        Global modes apply the same extraction strategy across all tree ages:
+        - 'upper': Mean of upper third of canopy
+        - 'middle': Mean of middle third of canopy
+        - 'lower': Mean of lower third of canopy
+        - 'mean': Mean of all canopy layers
+
+        Args:
+            dataset: xarray Dataset containing PCM variable
+            variable: Variable name (config name)
+            modes: Single mode string or list of modes to extract
+            z_dim: Name of vertical dimension (default: 'zpc_3d')
+
+        Returns:
+            Dictionary mapping mode name to 2D array [y, x]:
+                {'upper': array, 'middle': array, 'lower': array, 'mean': array}
+        """
+        # Ensure modes is a list
+        if isinstance(modes, str):
+            modes = [modes]
+
+        self.logger.info(f"Extracting PCM variable '{variable}' with global modes: {modes}")
+
+        # Find variable in dataset
+        var_data, var_name_found = self._find_variable_in_dataset(dataset, variable)
+        self.logger.info(f"  Found PALM variable: '{var_name_found}'")
+
+        # Verify it's a PCM variable
+        if z_dim not in var_data.dims:
+            raise ValueError(
+                f"Variable '{var_name_found}' does not have '{z_dim}' dimension. "
+                f"Available dimensions: {list(var_data.dims)}"
+            )
+
+        results = {}
+
+        # Handle 'mean' mode (simple case - average all layers)
+        if 'mean' in modes:
+            self.logger.info("  Computing 'mean' mode (average of all canopy layers)")
+            mean_2d = var_data.mean(dim=['time', z_dim]).values
+
+            # ===== CRITICAL FIX: Convert zeros to NaN =====
+            # PCM variables have 0.0 where there's no canopy
+            zero_threshold = 1e-10
+            mean_2d = np.where(np.abs(mean_2d) > zero_threshold, mean_2d, np.nan)
+
+            results['mean'] = mean_2d
+            self.logger.info(f"    Mean mode: value range [{np.nanmin(mean_2d):.3f}, "
+                           f"{np.nanmax(mean_2d):.3f}]")
+
+        # Handle stratified modes (upper/middle/lower)
+        stratified_modes = [m for m in modes if m in ['upper', 'middle', 'lower']]
+        if stratified_modes:
+            self.logger.info(f"  Computing stratified modes: {stratified_modes}")
+
+            # Perform stratification
+            strat_result = self._stratify_pcm_canopy(var_data, z_dim)
+
+            lower_indices = strat_result['lower_indices']
+            middle_indices = strat_result['middle_indices']
+            upper_indices = strat_result['upper_indices']
+            valid_mask = strat_result['valid_mask']
+            ny = strat_result['ny']
+            nx = strat_result['nx']
+
+            # Time-averaged data for extraction
+            if 'time' in var_data.dims:
+                var_data_mean = var_data.mean(dim='time').values
+            else:
+                var_data_mean = var_data.values
+
+            # Extract each stratified mode
+            mode_map = {
+                'lower': lower_indices,
+                'middle': middle_indices,
+                'upper': upper_indices
+            }
+
+            for mode in stratified_modes:
+                self.logger.info(f"  Extracting '{mode}' layer...")
+                indices = mode_map[mode]
+
+                # Initialize output array
+                mode_array = np.full((ny, nx), np.nan)
+
+                # Get valid positions for faster iteration
+                valid_positions = np.argwhere(valid_mask)
+
+                # For each valid position, compute mean of assigned layers
+                for iy, ix in valid_positions:
+                    layer_indices = indices[iy][ix]
+                    if len(layer_indices) > 0:
+                        # Extract values at these indices and compute mean
+                        layer_values = var_data_mean[layer_indices, iy, ix]
+                        mode_array[iy, ix] = np.nanmean(layer_values)
+
+                results[mode] = mode_array
+                self.logger.info(f"    {mode.capitalize()} mode: value range "
+                               f"[{np.nanmin(mode_array):.3f}, {np.nanmax(mode_array):.3f}]")
+
+        return results
+
+    def _extract_pcm_individual_mode(self,
+                                      dataset: xr.Dataset,
+                                      variable: str,
+                                      domain_type: str,
+                                      case_name: str,
+                                      settings: Dict,
+                                      z_dim: str = 'zpc_3d') -> np.ndarray:
+        """
+        Extract PCM variable using individual age-specific offsets.
+
+        This mode allows granular control per tree age group and domain.
+        The offset is applied from the base (lowest) of the canopy at each position.
+
+        Args:
+            dataset: xarray Dataset containing PCM variable
+            variable: Variable name (config name)
+            domain_type: 'parent' or 'child'
+            case_name: Simulation case name (e.g., 'thf_forest_lad_spacing_10m_age_20yrs')
+            settings: Configuration settings dict
+            z_dim: Name of vertical dimension (default: 'zpc_3d')
+
+        Returns:
+            2D array [y, x] with extracted values at specified offset
+
+        Raises:
+            ValueError: If age cannot be parsed or offset not configured
+        """
+        self.logger.info(f"Extracting PCM variable '{variable}' with individual mode")
+
+        # Parse age from case name
+        age_yrs = self._parse_age_from_case_name(case_name)
+        if age_yrs is None:
+            raise ValueError(
+                f"Could not parse tree age from case name '{case_name}'. "
+                f"Expected format: '...age_XXyrs'"
+            )
+
+        self.logger.info(f"  Detected tree age: {age_yrs} years")
+        self.logger.info(f"  Domain type: {domain_type}")
+
+        # Get individual mode configuration
+        pcm_config = settings.get('terrain_following', {}).get('pcm_transect_z_offset', {})
+        individual_config = pcm_config.get('individual', {})
+        domain_config = individual_config.get(domain_type, {})
+
+        # Get offset for this age (key format: "20yrs", "40yrs", etc.)
+        age_key = f"{age_yrs}yrs"
+        if age_key not in domain_config:
+            raise ValueError(
+                f"No PCM offset configured for age '{age_key}' in domain '{domain_type}'. "
+                f"Available ages: {list(domain_config.keys())}"
+            )
+
+        offset = domain_config[age_key]
+        self.logger.info(f"  Using configured offset: {offset} grid cells from canopy base")
+
+        # Find variable in dataset
+        var_data, var_name_found = self._find_variable_in_dataset(dataset, variable)
+
+        # Verify it's a PCM variable
+        if z_dim not in var_data.dims:
+            raise ValueError(
+                f"Variable '{var_name_found}' does not have '{z_dim}' dimension"
+            )
+
+        # Time-averaged data
+        if 'time' in var_data.dims:
+            var_data_mean = var_data.mean(dim='time').values
+        else:
+            var_data_mean = var_data.values
+
+        nz, ny, nx = var_data_mean.shape
+
+        # ===== CRITICAL FIX: Convert zeros to NaN (same as stratification) =====
+        # PCM variables have 0.0 where there's no canopy - treat as no data
+        zero_threshold = 1e-10
+        var_data_mean = np.where(np.abs(var_data_mean) > zero_threshold, var_data_mean, np.nan)
+
+        # Initialize output array
+        result_array = np.full((ny, nx), np.nan)
+
+        # Find positions with valid data (vectorized)
+        # Now this correctly excludes positions that were all zeros
+        has_data = ~np.isnan(var_data_mean)  # Shape: [nz, ny, nx]
+        has_any_data = np.any(has_data, axis=0)  # Shape: [ny, nx]
+        valid_positions = np.argwhere(has_any_data)  # Shape: [n_valid, 2]
+
+        # For each valid position, apply offset from canopy base
+        n_valid = 0
+        n_out_of_bounds = 0
+
+        for iy, ix in valid_positions:
+            # Extract vertical profile (simple numpy indexing)
+            profile = var_data_mean[:, iy, ix]
+
+            # Find non-NaN indices
+            valid_z_indices = np.where(~np.isnan(profile))[0]
+
+            if len(valid_z_indices) == 0:
+                continue
+
+            # Canopy base (lowest valid index)
+            canopy_base = valid_z_indices[0]
+
+            # Apply offset
+            target_z = canopy_base + offset
+
+            # Validate bounds
+            if target_z < 0 or target_z >= nz:
+                n_out_of_bounds += 1
+                continue
+
+            # Check if target has valid data
+            if target_z in valid_z_indices:
+                result_array[iy, ix] = profile[target_z]
+                n_valid += 1
+
+        self.logger.info(f"  Extracted {n_valid} valid positions")
+        if n_out_of_bounds > 0:
+            self.logger.warning(f"  {n_out_of_bounds} positions had offset out of bounds")
+
+        value_min = np.nanmin(result_array)
+        value_max = np.nanmax(result_array)
+        self.logger.info(f"  Value range: [{value_min:.3f}, {value_max:.3f}]")
+
+        return result_array
+
+    def _parse_age_from_case_name(self, case_name: str) -> Optional[int]:
+        """
+        Parse tree age in years from case name.
+
+        Expected format: '...age_XXyrs' where XX is the age number.
+        Examples:
+            'thf_forest_lad_spacing_10m_age_20yrs' -> 20
+            'thf_forest_lad_spacing_15m_age_40yrs' -> 40
+
+        Args:
+            case_name: Simulation case name
+
+        Returns:
+            Age in years (int), or None if parsing fails
+        """
+        import re
+        match = re.search(r'age_(\d+)yrs', case_name)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _extract_pcm_transect(self,
+                               dataset: xr.Dataset,
+                               domain_type: str,
+                               variable: str,
+                               case_name: str,
+                               settings: Dict) -> Union[Dict[str, np.ndarray], np.ndarray, None]:
+        """
+        Main router method for PCM variable transect extraction.
+
+        This method orchestrates PCM extraction by:
+        1. Checking if PCM extraction is enabled in configuration
+        2. Verifying the variable is actually a PCM variable
+        3. Determining the extraction mode (global vs individual)
+        4. Dispatching to appropriate extraction method
+        5. Returning results with mode metadata
+
+        Args:
+            dataset: xarray Dataset containing PCM variable
+            domain_type: 'parent' or 'child'
+            variable: Variable name (config name)
+            case_name: Simulation case name
+            settings: Configuration settings dict
+
+        Returns:
+            - For global mode with single mode: np.ndarray [y, x]
+            - For global mode with multiple modes: Dict[str, np.ndarray] mapping mode -> array
+            - For individual mode: np.ndarray [y, x]
+            - None if PCM extraction disabled or variable is not PCM
+
+        Raises:
+            ValueError: If configuration is invalid or required parameters missing
+        """
+        # Check if PCM extraction is enabled
+        pcm_config = settings.get('terrain_following', {}).get('pcm_transect_z_offset', {})
+
+        if not pcm_config.get('enabled', False):
+            self.logger.debug("PCM transect extraction not enabled in configuration")
+            return None
+
+        # Verify this is a PCM variable
+        if not self._is_pcm_variable(variable, dataset):
+            self.logger.debug(f"Variable '{variable}' is not a PCM variable, skipping PCM extraction")
+            return None
+
+        self.logger.info(f"\n{'='*70}")
+        self.logger.info(f"PCM TRANSECT EXTRACTION: {variable}")
+        self.logger.info(f"{'='*70}")
+        self.logger.info(f"  Domain: {domain_type}")
+        self.logger.info(f"  Case: {case_name}")
+
+        # Get mode setting
+        mode = pcm_config.get('mode', None)
+
+        if mode is None:
+            raise ValueError(
+                "PCM transect extraction enabled but 'mode' not specified. "
+                "Must be one of: 'upper', 'middle', 'lower', 'mean', 'individual', "
+                "or a list like ['upper', 'middle']"
+            )
+
+        # Convert single mode to list for uniform handling
+        if isinstance(mode, str):
+            mode_list = [mode]
+        else:
+            mode_list = mode
+
+        self.logger.info(f"  Mode(s): {mode_list}")
+
+        # Validate mode types
+        valid_modes = ['upper', 'middle', 'lower', 'mean', 'individual']
+        for m in mode_list:
+            if m not in valid_modes:
+                raise ValueError(
+                    f"Invalid PCM mode '{m}'. Must be one of: {valid_modes}"
+                )
+
+        # Check for mutual exclusivity: global modes vs individual
+        has_global = any(m in ['upper', 'middle', 'lower', 'mean'] for m in mode_list)
+        has_individual = 'individual' in mode_list
+
+        if has_global and has_individual:
+            raise ValueError(
+                "Cannot mix global modes (upper/middle/lower/mean) with individual mode. "
+                "Choose either global OR individual extraction."
+            )
+
+        # Route to appropriate extraction method
+        if has_individual:
+            # Individual mode extraction
+            self.logger.info("  Using INDIVIDUAL mode (age-specific offsets)")
+            result_array = self._extract_pcm_individual_mode(
+                dataset=dataset,
+                variable=variable,
+                domain_type=domain_type,
+                case_name=case_name,
+                settings=settings
+            )
+            return result_array
+
+        else:
+            # Global mode extraction (one or more modes)
+            self.logger.info(f"  Using GLOBAL mode(s): {mode_list}")
+            results_dict = self._extract_pcm_global_mode(
+                dataset=dataset,
+                variable=variable,
+                modes=mode_list
+            )
+
+            # If only one mode, return array directly instead of dict
+            if len(mode_list) == 1:
+                single_mode = mode_list[0]
+                self.logger.info(f"  Returning single mode result: {single_mode}")
+                return results_dict[single_mode]
+            else:
+                self.logger.info(f"  Returning multi-mode results: {list(results_dict.keys())}")
+                return results_dict
+
+    # ========================================================================
     # Terrain-Following Extraction Method
     # ========================================================================
 
@@ -2585,15 +3149,34 @@ class TerrainTransectPlotter(BasePlotter):
         """
         Extract 1D transect line from 2D field with width averaging
 
+        This method handles both dense data (e.g., atmospheric variables) and sparse data
+        (e.g., PCM canopy variables where values only exist at tree locations).
+
+        **Sparse Data Handling**:
+        For PCM variables, the input 2D array is sparse - most grid cells are NaN (no trees),
+        and only cells with canopy have values. When averaging over the transect width:
+        - Some x-positions have NO canopy data in the averaging window → result is NaN (correct)
+        - Some x-positions have canopy data → result is averaged value (correct)
+        - The "mean of empty slice" warning is suppressed as it's expected for sparse data
+
+        Example: Child domain with 10m spacing trees
+        - Transect at y=100 with width=10 averages y=[90:111]
+        - At x=50: no trees in y=[90:111] → transect[50] = NaN
+        - At x=120: tree canopy in y=[90:111] → transect[120] = mean(canopy_values)
+
         Args:
-            data_2d: 2D array [y, x]
+            data_2d: 2D array [y, x] - can be dense or sparse
             axis: 'x' or 'y' - direction of transect
             location: Grid index for transect location
             width: Number of grid cells to average on each side
 
         Returns:
             Tuple of (transect_values, coordinates)
+            - transect_values: 1D array with averaged values (contains NaN for empty regions)
+            - coordinates: 1D array of coordinate indices
         """
+        import warnings
+
         ny, nx = data_2d.shape
 
         if axis == 'x':
@@ -2601,8 +3184,12 @@ class TerrainTransectPlotter(BasePlotter):
             y_min = max(0, location - width)
             y_max = min(ny, location + width + 1)
 
-            # Average over y range - use nanmean to preserve NaN values (e.g., buildings)
-            transect = np.nanmean(data_2d[y_min:y_max, :], axis=0)
+            # Average over y range - suppress "mean of empty slice" warning for sparse data
+            # This warning is expected for PCM variables where canopy data is sparse
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=RuntimeWarning,
+                                       message='Mean of empty slice')
+                transect = np.nanmean(data_2d[y_min:y_max, :], axis=0)
             coordinates = np.arange(nx)
 
         elif axis == 'y':
@@ -2610,8 +3197,11 @@ class TerrainTransectPlotter(BasePlotter):
             x_min = max(0, location - width)
             x_max = min(nx, location + width + 1)
 
-            # Average over x range - use nanmean to preserve NaN values (e.g., buildings)
-            transect = np.nanmean(data_2d[:, x_min:x_max], axis=1)
+            # Average over x range - suppress "mean of empty slice" warning for sparse data
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=RuntimeWarning,
+                                       message='Mean of empty slice')
+                transect = np.nanmean(data_2d[:, x_min:x_max], axis=1)
             coordinates = np.arange(ny)
 
         else:
@@ -3039,6 +3629,71 @@ class TerrainTransectPlotter(BasePlotter):
                 print(msg)
                 self.logger.info(msg)
 
+                # ===== CHECK FOR PCM VARIABLE EXTRACTION =====
+                # Try PCM extraction first (returns None if not enabled or not PCM variable)
+                case_name = scenario.get('case_name', '')
+                pcm_result = self._extract_pcm_transect(
+                    dataset=dataset,
+                    domain_type=domain,
+                    variable=variable,
+                    case_name=case_name,
+                    settings=settings
+                )
+
+                if pcm_result is not None:
+                    # PCM extraction successful
+                    msg = f"\n✓ PCM extraction completed for {scenario['label']}"
+                    print(msg)
+                    self.logger.info(msg)
+
+                    # PCM result can be:
+                    # - Single mode: np.ndarray [y, x]
+                    # - Multiple modes: Dict[str, np.ndarray]
+
+                    if isinstance(pcm_result, dict):
+                        # Multiple modes - need to handle differently (return multiple transect lines)
+                        # For now, just use first mode and log warning
+                        # TODO: Implement multi-line support in future iteration
+                        mode_names = list(pcm_result.keys())
+                        self.logger.warning(
+                            f"Multiple PCM modes detected ({mode_names}). "
+                            f"Currently using first mode '{mode_names[0]}'. "
+                            f"Multi-line plotting support coming in next iteration."
+                        )
+                        slice_2d = pcm_result[mode_names[0]]
+                    else:
+                        # Single mode result
+                        slice_2d = pcm_result
+
+                    # Extract transect from 2D PCM field
+                    transect_values, coordinates = self._extract_transect_line(
+                        slice_2d, transect_axis, transect_location, transect_width
+                    )
+
+                    # Get building/LAD masks if static data available
+                    masks = None
+                    if static_dataset is not None:
+                        masks = self._get_building_lad_masks(
+                            static_dataset, transect_axis, transect_location,
+                            transect_width, domain
+                        )
+
+                    # Determine variable name for display
+                    _, var_name_found = self._find_variable_in_dataset(dataset, variable)
+
+                    return {
+                        'transect_values': transect_values,
+                        'coordinates': coordinates,
+                        'xy_slice': slice_2d,  # 2D context available
+                        'label': scenario['label'],
+                        'color': scenario['color'],
+                        'linestyle': scenario.get('linestyle', '-'),
+                        'linewidth': scenario.get('linewidth', 2.0),
+                        'masks': masks,
+                        'needs_kelvin_conversion': False  # PCM variables don't need K->C conversion
+                    }
+
+                # ===== REGULAR TERRAIN-FOLLOWING EXTRACTION (non-PCM) =====
                 if output_mode == '1d':
                     # 1D transect output (more memory efficient)
                     transect_values, coordinates, var_name, needs_conversion = \
@@ -3152,6 +3807,58 @@ class TerrainTransectPlotter(BasePlotter):
         except Exception as e:
             self.logger.error(f"Error extracting data for {scenario['label']}: {str(e)}")
             return None
+
+    def _select_map_display_scenario(self, scenarios_data: List[Dict], settings: Dict) -> Optional[Dict]:
+        """
+        Select which scenario to display in the 2D colormap based on configuration.
+
+        Args:
+            scenarios_data: List of scenario dictionaries with 'label' and 'xy_slice' keys
+            settings: Configuration settings dictionary
+
+        Returns:
+            Selected scenario dictionary or None if no suitable scenario found
+        """
+        if not scenarios_data:
+            return None
+
+        # Get configuration setting
+        tf_settings = settings.get('terrain_following', {})
+        map_display_scenario = tf_settings.get('map_display_scenario', 'first')
+
+        # Handle special keywords
+        if map_display_scenario == 'first':
+            selected = scenarios_data[0]
+            self.logger.info(f"2D map: Displaying first scenario '{selected['label']}'")
+            return selected
+
+        elif map_display_scenario == 'last':
+            selected = scenarios_data[-1]
+            self.logger.info(f"2D map: Displaying last scenario '{selected['label']}'")
+            return selected
+
+        else:
+            # Search for specific label match
+            for scenario in scenarios_data:
+                if scenario['label'] == map_display_scenario:
+                    self.logger.info(f"2D map: Displaying configured scenario '{scenario['label']}'")
+                    return scenario
+
+            # If no exact match, try case-insensitive match
+            map_display_lower = map_display_scenario.lower()
+            for scenario in scenarios_data:
+                if scenario['label'].lower() == map_display_lower:
+                    self.logger.info(f"2D map: Displaying scenario '{scenario['label']}' "
+                                   f"(case-insensitive match for '{map_display_scenario}')")
+                    return scenario
+
+            # No match found - fall back to first scenario
+            self.logger.warning(
+                f"2D map: Configured scenario '{map_display_scenario}' not found. "
+                f"Available scenarios: {[s['label'] for s in scenarios_data]}. "
+                f"Falling back to first scenario '{scenarios_data[0]['label']}'"
+            )
+            return scenarios_data[0]
 
     def _create_transect_plot(self, scenarios_data: List[Dict],
                              variable: str,
@@ -3390,7 +4097,13 @@ class TerrainTransectPlotter(BasePlotter):
 
         # Plot XY plan view in bottom panel (only if 2D context available)
         if ax_map is not None and len(scenarios_data) > 0:
-            xy_slice = scenarios_data[0]['xy_slice']
+            # Select which scenario to display based on configuration
+            selected_scenario = self._select_map_display_scenario(scenarios_data, settings)
+
+            if selected_scenario is not None:
+                xy_slice = selected_scenario['xy_slice']
+            else:
+                xy_slice = None
 
             if xy_slice is not None:
                 # Convert to physical units
@@ -3530,6 +4243,10 @@ class TerrainTransectPlotter(BasePlotter):
                 ax_map.set_ylabel('Y Axis (m)')
                 ax_map.set_aspect('equal')  # Ensure square aspect ratio for 2D slice
 
+                # Add title indicating which scenario is displayed
+                map_title = f"2D Map: {selected_scenario['label']}"
+                ax_map.set_title(map_title, fontsize=11, fontweight='normal', loc='left')
+
                 # Explicitly set limits to match extent (ensures full width is shown)
                 # Without this, aspect='equal' may shrink the axes to fit the allocated space
                 ax_map.set_xlim(extent_x_min, extent_x_max)
@@ -3540,7 +4257,10 @@ class TerrainTransectPlotter(BasePlotter):
 
         # Add horizontal colorbar after tight_layout (only if 2D map exists)
         if ax_map is not None and len(scenarios_data) > 0:
-            xy_slice = scenarios_data[0]['xy_slice']
+            # Use the same scenario selection as for the map display
+            selected_scenario = self._select_map_display_scenario(scenarios_data, settings)
+            xy_slice = selected_scenario['xy_slice'] if selected_scenario is not None else None
+
             if xy_slice is not None:
                 # Add horizontal colorbar below the x-axis that spans full width
                 # Use manual positioning to avoid distorting the 2D slice aspect ratio
