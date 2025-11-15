@@ -685,7 +685,7 @@ plots:
   # Test fig_6 with terrain-following method
   figures:
     fig_6:
-      enabled: true
+      enabled: false
       title: "Terrain-Following Transect Analysis (Multi-Variable)"
       description: "Multi-variable terrain-following extraction and comparison plots"
 
@@ -1024,6 +1024,101 @@ plots:
 
         # Terrain mask height (not used in terrain_following mode, but kept for compatibility)
         terrain_mask_height_z: 0
+
+    # ============================================================
+    # FIG_3: SPATIAL COOLING PATTERNS (MULTI-VARIABLE SUPPORT)
+    # ============================================================
+    fig_3:
+      enabled: true
+      title: "Spatial Patterns - Multi-Variable Analysis"
+      description: "Horizontal distribution with variable selection and terrain-following support"
+
+      # ===== VARIABLE SELECTION =====
+      # Single variable per figure
+      variable: "temperature"  # From data.variables section
+
+      # Alternatively, specify multiple variables to generate separate figures
+      # variables: ["temperature", "humidity_q", "utci", "radiation_net"]
+
+      # ===== PLOT TYPES TO GENERATE =====
+      plot_types:
+        daytime_cooling: true        # Spatial cooling at daytime hour
+        nighttime_cooling: false      # Spatial cooling at nighttime hour
+        cooling_extent: false        # Cooling extent analysis (placeholder)
+        temperature_maps: true       # Time-averaged temperature maps
+
+      # ===== SETTINGS =====
+      settings:
+        # ===== EXTRACTION METHOD =====
+        # Options: 'slice' (absolute height) or 'terrain_following' (relative to terrain)
+        extraction_method: "terrain_following"  # Use 'terrain_following' for complex terrain
+
+        # ===== HEIGHT/OFFSET SETTINGS =====
+        # For 'slice' method: absolute height in meters
+        analysis_height: 2.0  # meters above sea level
+
+        # For 'terrain_following' method: z-index offset from terrain surface
+        terrain_mask_height_z: 1  # 0 = first grid point above terrain
+
+        # ===== TIME SELECTION =====
+        # For daytime_cooling and nighttime_cooling plots
+
+        # Single hour (hour of day, 0-23):
+        daytime_hour: 14  # 2 PM
+        nighttime_hour: 2  # 2 AM
+
+        # Alternatively, use time ranges (simulation hours 0-48):
+        # daytime_hour: [24, 48]  # Average over simulation hours 24-48
+        # nighttime_hour: [0, 12]  # Average over simulation hours 0-12
+
+        # ===== VARIABLE-SPECIFIC AUTO-SCALING =====
+        # Configure scaling behavior per variable
+        variable_settings:
+          temperature:
+            # Enable automatic scaling from data
+            auto_scale: true  # Set to false for fixed range
+            vmin: 24.0  # Fixed minimum
+            vmax: 30.0  # Fixed maximum
+            # percentile_clip: 2  # Optional: clip outliers at 2nd/98th percentile
+            cmap: "RdBu_r"  # Colormap for temperature
+
+            # Difference plot settings (cooling effect)
+            difference:
+              auto_scale: true  # Fixed range for cooling
+              vmin: -6.0
+              vmax: 6.0
+              # percentile_clip: 5  # Optional: clip outliers
+              cmap: "RdBu_r"  # Diverging colormap
+
+          humidity_q:
+            auto_scale: true  # Auto-scale from data
+            # percentile_clip: 2  # Optional: clip outliers
+            cmap: "YlGnBu"
+            difference:
+              auto_scale: true
+
+          utci:
+            auto_scale: true
+            cmap: "RdYlBu_r"
+            difference:
+              auto_scale: true
+
+          radiation_net:
+            auto_scale: true
+            cmap: "hot_r"
+            difference:
+              auto_scale: true
+
+        # ===== DOMAIN SETTINGS =====
+        # For temperature_maps plot type
+        plot_parent_domain: true   # Enable parent domain plotting
+        plot_child_domain: true    # Enable child domain plotting
+        temp_vmin: 24  # Minimum temperature for maps (if auto_scale: false)
+        temp_vmax: 30  # Maximum temperature for maps (if auto_scale: false)
+
+        # ===== VISUALIZATION SETTINGS =====
+        show_tree_locations: false  # Overlay tree locations (requires tree data)
+        show_edge_effects: true     # Show domain edge effects
 
 # Analysis Settings
 analysis:

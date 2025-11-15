@@ -250,13 +250,19 @@ class ConfigHandler:
             if not item_config['enabled']:
                 continue
 
-            # Check for old format (plot_types) and reject it
+            # Figures using plot_types format (e.g., fig_3 for spatial patterns)
+            # These use a different validation structure
             if 'plot_types' in item_config:
-                raise ValueError(
-                    f"{item_id}: Old 'plot_types' format is no longer supported. "
-                    f"Please migrate to new format with 'variables', 'plot_matrix', "
-                    f"and optionally 'variable_overrides'. See documentation for details."
-                )
+                # Only certain figures are allowed to use plot_types format
+                if item_id in ['fig_3', 'slide_8']:  # Spatial cooling patterns
+                    self._validate_fig3_settings(item_id, item_config)
+                else:
+                    raise ValueError(
+                        f"{item_id}: Old 'plot_types' format is no longer supported. "
+                        f"Please migrate to new format with 'variables', 'plot_matrix', "
+                        f"and optionally 'variable_overrides'. See documentation for details."
+                    )
+                continue
 
             # Validate new format: variables and plot_matrix
             if 'variables' not in item_config or 'plot_matrix' not in item_config:
@@ -643,6 +649,157 @@ class ConfigHandler:
 
         # NEW: Validate mask cache settings if present
         self._validate_terrain_mask_cache_settings(item_id, tf_settings)
+
+    def _validate_fig3_settings(self, item_id: str, item_config: Dict):
+        """
+        Validate fig_3 (spatial cooling patterns) specific settings.
+
+        Args:
+            item_id: Figure/slide identifier (e.g., 'fig_3', 'slide_8')
+            item_config: Figure configuration dictionary
+        """
+        self.logger.debug(f"{item_id}: Validating fig_3 settings")
+
+        # Validate variable selection
+        if 'variable' not in item_config:
+            raise ValueError(
+                f"{item_id}: Missing 'variable' field. "
+                "Must specify a single variable from data.variables"
+            )
+
+        # Check that variable exists in data.variables
+        variable = item_config['variable']
+        defined_vars = set(self.config['data']['variables'].keys())
+        if variable not in defined_vars:
+            raise ValueError(
+                f"{item_id}: Variable '{variable}' not found in data.variables. "
+                f"Available: {sorted(defined_vars)}"
+            )
+
+        # Validate plot_types
+        if 'plot_types' not in item_config:
+            raise ValueError(f"{item_id}: Missing 'plot_types' section")
+
+        plot_types = item_config['plot_types']
+        valid_plot_types = ['daytime_cooling', 'nighttime_cooling', 'cooling_extent', 'temperature_maps']
+        for plot_type, enabled in plot_types.items():
+            if plot_type not in valid_plot_types:
+                raise ValueError(
+                    f"{item_id}: Invalid plot_type '{plot_type}'. "
+                    f"Valid types: {valid_plot_types}"
+                )
+            if not isinstance(enabled, bool):
+                raise ValueError(
+                    f"{item_id}: plot_type '{plot_type}' must be boolean (true/false)"
+                )
+
+        # Validate settings if present
+        if 'settings' in item_config:
+            settings = item_config['settings']
+
+            # Validate extraction method
+            extraction_method = settings.get('extraction_method', 'slice')
+            if extraction_method not in ['slice', 'terrain_following']:
+                raise ValueError(
+                    f"{item_id}: Invalid extraction_method '{extraction_method}'. "
+                    "Must be 'slice' or 'terrain_following'"
+                )
+
+            # Validate height settings
+            if extraction_method == 'slice':
+                if 'analysis_height' in settings:
+                    height = settings['analysis_height']
+                    if not isinstance(height, (int, float)) or height < 0:
+                        raise ValueError(
+                            f"{item_id}: analysis_height must be non-negative number"
+                        )
+            else:  # terrain_following
+                if 'terrain_mask_height_z' in settings:
+                    z_offset = settings['terrain_mask_height_z']
+                    if not isinstance(z_offset, int):
+                        raise ValueError(
+                            f"{item_id}: terrain_mask_height_z must be integer"
+                        )
+
+            # Validate time selection for daytime/nighttime hours
+            for time_key in ['daytime_hour', 'nighttime_hour']:
+                if time_key in settings:
+                    time_val = settings[time_key]
+                    # Can be single int or list [start, end]
+                    if isinstance(time_val, int):
+                        if not (0 <= time_val <= 23):
+                            raise ValueError(
+                                f"{item_id}: {time_key} must be 0-23, got {time_val}"
+                            )
+                    elif isinstance(time_val, list):
+                        if len(time_val) != 2:
+                            raise ValueError(
+                                f"{item_id}: {time_key} as list must have exactly 2 elements [start, end]"
+                            )
+                        start, end = time_val
+                        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+                            raise ValueError(
+                                f"{item_id}: {time_key} range must be numeric"
+                            )
+                        if start >= end:
+                            raise ValueError(
+                                f"{item_id}: {time_key} range invalid: start >= end"
+                            )
+                    else:
+                        raise ValueError(
+                            f"{item_id}: {time_key} must be int or [start, end] list"
+                        )
+
+            # Validate variable_settings if present
+            if 'variable_settings' in settings:
+                var_settings = settings['variable_settings']
+                for var_name, var_config in var_settings.items():
+                    # Variable must exist
+                    if var_name not in defined_vars:
+                        self.logger.warning(
+                            f"{item_id}: variable_settings references '{var_name}' "
+                            f"which is not in data.variables"
+                        )
+
+                    # Validate auto_scale
+                    if 'auto_scale' in var_config:
+                        if not isinstance(var_config['auto_scale'], bool):
+                            raise ValueError(
+                                f"{item_id}: variable_settings.{var_name}.auto_scale must be boolean"
+                            )
+
+                    # Validate vmin/vmax if present
+                    if 'vmin' in var_config and 'vmax' in var_config:
+                        vmin, vmax = var_config['vmin'], var_config['vmax']
+                        if not isinstance(vmin, (int, float)) or not isinstance(vmax, (int, float)):
+                            raise ValueError(
+                                f"{item_id}: variable_settings.{var_name}.vmin/vmax must be numeric"
+                            )
+                        if vmin >= vmax:
+                            raise ValueError(
+                                f"{item_id}: variable_settings.{var_name}: vmin >= vmax"
+                            )
+
+                    # Validate percentile_clip if present
+                    if 'percentile_clip' in var_config:
+                        clip = var_config['percentile_clip']
+                        if not isinstance(clip, (int, float)) or not (0 <= clip <= 50):
+                            raise ValueError(
+                                f"{item_id}: variable_settings.{var_name}.percentile_clip "
+                                "must be number between 0 and 50"
+                            )
+
+                    # Validate difference settings if present
+                    if 'difference' in var_config:
+                        diff_config = var_config['difference']
+                        # Same validation for difference settings
+                        if 'auto_scale' in diff_config:
+                            if not isinstance(diff_config['auto_scale'], bool):
+                                raise ValueError(
+                                    f"{item_id}: variable_settings.{var_name}.difference.auto_scale must be boolean"
+                                )
+
+        self.logger.info(f"{item_id}: Fig_3 settings validated successfully")
 
     def _validate_terrain_mask_cache_settings(self, item_id: str, tf_settings: Dict):
         """
