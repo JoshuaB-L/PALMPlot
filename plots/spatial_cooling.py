@@ -506,8 +506,9 @@ class SpatialCoolingPlotter(BasePlotter):
                 time_seconds = dataset['time'].values.astype('timedelta64[s]').astype(float)
                 time_hours = time_seconds / 3600.0
 
-                # Create mask for time range
-                time_mask = (time_hours >= start_hour) & (time_hours <= end_hour)
+                # Filter out NaN/inf values from time conversion issues (e.g., NaT values)
+                valid_time_mask = np.isfinite(time_hours) & (time_hours >= 0)
+                time_mask = valid_time_mask & (time_hours >= start_hour) & (time_hours <= end_hour)
 
                 if not any(time_mask):
                     self.logger.warning(f"No data found for time range {start_hour}-{end_hour}")
@@ -620,9 +621,13 @@ class SpatialCoolingPlotter(BasePlotter):
                 start_hour, end_hour = hour
                 self.logger.info(f"Terrain-following extraction for time window: sim hours {start_hour}-{end_hour}")
 
+                # Convert time to hours, handling NaT values safely
                 time_seconds = dataset['time'].values.astype('timedelta64[s]').astype(float)
                 time_hours = time_seconds / 3600.0
-                time_mask = (time_hours >= start_hour) & (time_hours <= end_hour)
+
+                # Filter out NaN/inf values from time conversion issues
+                valid_time_mask = np.isfinite(time_hours) & (time_hours >= 0)
+                time_mask = valid_time_mask & (time_hours >= start_hour) & (time_hours <= end_hour)
 
                 if not any(time_mask):
                     self.logger.warning(f"No data found for time range {start_hour}-{end_hour}")
