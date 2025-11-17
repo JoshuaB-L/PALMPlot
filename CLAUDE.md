@@ -24,6 +24,12 @@ python -m palmplot_thf palmplot_config.yaml --list-plots
 ```bash
 # Test specific plotting functionality
 python test_temperature_maps.py
+
+# Test fig_3 terrain-following implementation
+python test_fig3_implementation.py
+
+# Test with fig_3 test configuration
+python -m palmplot_thf palmplot_config_fig3_test.yaml
 ```
 
 ## Architecture
@@ -66,7 +72,7 @@ python test_temperature_maps.py
 **Plotter Modules** (all inherit from `BasePlotter`)
 - `TreeDensityPlotter` (fig_1): Visualizes tree density scenarios in matrix layout
 - `TemperatureDynamicsPlotter` (fig_2): Time series and diurnal temperature cycles
-- `SpatialCoolingPlotter` (fig_3): Horizontal temperature distribution, cooling patterns, time-averaged temperature maps
+- `SpatialCoolingPlotter` (fig_3): Horizontal spatial patterns with variable selection, terrain-following support, time window averaging, and auto-scaling
 - `VerticalProfilePlotter` (fig_4): Vertical cross-sections and height profiles
 - `CoolingRelationshipPlotter` (fig_5): Age-density-cooling surface plots and optimization
 
@@ -141,6 +147,189 @@ python test_temperature_maps.py
 - The `_get_plot_settings()` helper handles both 'figures' and 'slides' config structures
 - Legacy slide-based configuration still supported for backward compatibility
 
+### Terrain-Following Extraction and Enhanced Caching
+
+**Overview**
+Terrain-following extraction is a method for extracting 3D data at a constant height above terrain/buildings, rather than at absolute height. This is critical for accurate analysis in complex urban terrain. Both fig_3 and fig_6 support terrain-following with enhanced caching.
+
+**Global Configuration**
+Shared terrain-following settings are defined in `plots.terrain_following`:
+```yaml
+plots:
+  terrain_following:
+    default_method: 'terrain_following'  # or 'slice' for absolute height
+    buildings_mask: true                 # Enable/disable building masking
+    buildings_mask_mode: 'natural_mask'  # 'natural_mask' (default) or 'static_mask'
+    time_selection_method: 'mean'        # 'mean', 'mean_timeframe', 'single_timestep'
+
+    mask_cache:
+      enabled: true
+      mode: 'auto'  # 'auto', 'load', or 'save'
+      cache_directory: "/path/to/cache/terrain_masks"
+      levels:
+        max_levels: 25
+        offsets: [0, 1, 2, 5, 10]  # Heights above surface to cache
+      validation:
+        check_time_mode: true
+        check_building_mask: true
+        on_mismatch: 'recompute'  # 'warn', 'recompute', or 'error'
+
+    surface_data_cache:
+      enabled: true
+      mode: 'auto'
+      cache_directory: "/path/to/cache/surface_data"
+```
+
+**Enhanced Cache Naming Convention**
+Cache files now include time mode and building mask state for proper differentiation:
+
+**Terrain Mask Files:**
+- Pattern: `{case_name}_terrain_mask_{domain}_{time_mode}_{mask_mode}_TF{offsets}.nc`
+- Examples:
+  - `thf_base_terrain_mask_parent_all_times_average_masked_TF0-2.nc`
+  - `thf_forest_10m_20yrs_terrain_mask_child_time_window_30_42_unmasked_TF0-1-5-10.nc`
+  - `thf_forest_15m_40yrs_terrain_mask_parent_single_time_14_masked_TF1.nc`
+
+**Surface Data Files:**
+- Pattern: `{case_name}_surface_data_{domain}_{time_mode}.nc`
+- Examples:
+  - `thf_base_surface_data_child_all_times_average.nc`
+  - `thf_forest_10m_20yrs_surface_data_parent_time_window_21_30.nc`
+
+**Time Modes:**
+- `all_times_average`: Average over all simulation timesteps
+- `time_window_{start}_{end}`: Average over specific simulation hour range
+- `single_time_{hour}`: Single timestep snapshot at specific hour of day
+
+**Building Mask Modes:**
+
+The `buildings_mask_mode` parameter controls how building regions are identified and masked during terrain-following extraction:
+
+1. **`natural_mask` (DEFAULT, RECOMMENDED)**
+   - Relies on fill values in atmospheric data to naturally determine masked regions
+   - Does NOT use the static `buildings_2d` field as a 2D mask
+   - Respects actual building heights: atmospheric data above building roofs is included
+   - Eliminates artificial "outline zone" artifacts around buildings
+   - More physically accurate for vertical profiles
+   - **How it works:** The `has_valid_data` check already excludes grid cells where atmospheric variables have fill values (buildings/terrain). The natural_mask mode simply removes the additional static 2D mask constraint, allowing the algorithm to fill cells above building roofs where valid atmospheric data exists.
+
+2. **`static_mask` (LEGACY)**
+   - Uses `buildings_2d` from static driver files to create a 2D boolean mask
+   - Applies this fixed mask at ALL vertical levels
+   - Excludes building locations even when extraction height is above building roofs
+   - Can create "masking outline zones" in output due to static 2D constraint
+   - Useful for explicit building visualization or legacy comparisons
+   - **How it works:** Loads `buildings_2d > 0` to create boolean mask, inverts it (`~building_mask_2d`), and applies via boolean AND in the fillable condition at every vertical level.
+
+**Comparison:**
+```
+Vertical profile at building location:
+
+natural_mask:                  static_mask:
+z=40m: ✓ Valid atmospheric    z=40m: ✗ Masked (2D mask applied)
+z=30m: ✓ Valid atmospheric    z=30m: ✗ Masked (2D mask applied)
+z=20m: Building roof           z=20m: Building roof
+z=10m: ✗ Fill value (inside)  z=10m: ✗ Fill value + static mask
+z=0m:  ✗ Fill value (terrain)  z=0m:  ✗ Fill value + static mask
+
+Result: Natural mode includes atmospheric data above building roofs (physically accurate)
+        Static mode excludes ALL building locations regardless of height (over-masking)
+```
+
+**Configuration Examples:**
+```yaml
+# Recommended: Natural mask (default)
+terrain_following:
+  buildings_mask: true
+  buildings_mask_mode: 'natural_mask'
+
+# Legacy: Static mask for explicit building visualization
+terrain_following:
+  buildings_mask: true
+  buildings_mask_mode: 'static_mask'
+
+# No masking: Fill through all regions
+terrain_following:
+  buildings_mask: false
+  # buildings_mask_mode is ignored when buildings_mask: false
+```
+
+**Backward Compatibility:**
+The system automatically falls back to legacy cache file naming if enhanced files are not found. Legacy format: `{case_name}_terrain_mask_{domain}_TF{offsets}.nc`
+
+**Fig_3 Time Window Support**
+fig_3 (SpatialCoolingPlotter) now supports flexible time specifications:
+
+```yaml
+fig_3:
+  settings:
+    extraction_method: "terrain_following"
+    terrain_mask_height_z: 0  # Offset from terrain surface
+
+    # Time window (simulation hours 33-42)
+    daytime_hour: [33, 42]
+
+    # Single hour of day (6 AM)
+    nighttime_hour: 6
+
+    # All times average (omit or set to null)
+    # some_plot_hour: null
+```
+
+**Implementation Details:**
+- `spatial_cooling.py` delegates terrain-following extraction to `terrain_transect.py` via `_terrain_helper` instance
+- Time mode detection: `_determine_time_mode(hour)` converts hour specs to standardized (time_mode, time_params)
+- Enhanced cache loading: `_load_from_enhanced_cache()` searches for matching cache files with time/mask parameters
+- Cache files are shared between fig_3 and fig_6 when parameters match
+
+**Variable Selection and Auto-Scaling**
+fig_3 supports dynamic variable selection with automatic scaling:
+
+```yaml
+fig_3:
+  variable: "temperature"  # or "humidity_q", "utci", etc.
+
+  settings:
+    variable_settings:
+      temperature:
+        auto_scale: true  # Automatically determine vmin/vmax from data
+        percentile_clip: 2  # Optional: clip outliers at 2nd/98th percentile
+        cmap: "RdBu_r"
+        difference:
+          auto_scale: true  # Auto-scale difference plots
+          cmap: "RdBu_r"
+```
+
+Titles, colorbar labels, and scales are automatically updated based on selected variable.
+
+**PCM Variable Support**
+Both fig_3 and fig_6 support Plant Canopy Model (PCM) variables:
+- PCM variables use `zpc_3d` vertical coordinate (canopy levels)
+- Automatically detected via `_is_pcm_variable(variable, dataset)`
+- Special handling for zero-to-NaN conversion (PCM uses 0.0 for "no canopy")
+- Examples: `pcm_lad` (Leaf Area Density), `pcm_transpirationrate`
+
+**Key Methods in spatial_cooling.py:**
+- `_determine_time_mode(hour)`: Converts hour specification to (time_mode, time_params)
+- `_extract_terrain_following_2d()`: Delegates to terrain_helper for extraction
+- `_load_from_enhanced_cache()`: Loads cached data with time/mask filtering
+- `_is_pcm_variable()`: Delegates PCM detection to terrain_helper
+- `_load_static_dataset()`: Loads corresponding static file for terrain data
+
+**Cache Validation:**
+Cache files include metadata validated on load:
+- Grid size (nx, ny)
+- Domain type (parent/child)
+- Z-coordinate name
+- Time selection mode
+- Building mask state
+- Maximum age (optional warning if cache is old)
+
+On mismatch, the system can:
+- `warn`: Log warning but use cache anyway
+- `recompute`: Discard cache and recompute
+- `error`: Raise error and stop
+
 ## File Paths and Naming Conventions
 
 ### Input Data Locations
@@ -184,6 +373,50 @@ python test_temperature_maps.py
 - Verify NetCDF structure: `dataset.dims`, `dataset.data_vars`, `dataset.coords`
 - Test with single case: modify `test_temperature_maps.py` to load specific cases
 - Disable parallel processing: set `general.parallel_processing: false`
+
+### Using Terrain-Following in New Plotters
+To add terrain-following support to a new plotter:
+
+1. **Import TerrainTransectPlotter** in your plotter's `__init__`:
+   ```python
+   from .terrain_transect import TerrainTransectPlotter
+
+   def __init__(self, config, output_manager):
+       super().__init__(config, output_manager)
+       self._terrain_helper = TerrainTransectPlotter(config, output_manager)
+   ```
+
+2. **Read global terrain_following config** for cache directories:
+   ```python
+   tf_global = config.get('plots', {}).get('terrain_following', {})
+   mask_cache = tf_global.get('mask_cache', {})
+   if mask_cache.get('enabled', False):
+       self.terrain_mask_cache_dir = Path(mask_cache['cache_directory']).expanduser()
+   ```
+
+3. **Delegate extraction to terrain_helper**:
+   ```python
+   data_2d, var_name, needs_conversion = self._terrain_helper._extract_terrain_following(
+       dataset=dataset,
+       static_dataset=static_dataset,
+       domain_type='child',  # or 'parent'
+       variable=variable,
+       buildings_mask=True,
+       output_mode='2d',
+       settings=settings
+   )
+   ```
+
+4. **Use enhanced cache methods** for time-aware caching:
+   - Determine time mode: `time_mode, time_params = self._determine_time_mode(hour)`
+   - Load from cache: `self._load_from_enhanced_cache(..., time_mode, time_params, ...)`
+   - Cache files automatically differentiate by time window and building mask
+
+5. **Test your implementation**:
+   - Create test config with terrain-following enabled
+   - Run with cache mode='auto' to verify cache creation
+   - Verify cache file names follow enhanced convention
+   - Test with different time modes (single_time, time_window, all_times_average)
 
 ## Dependencies
 

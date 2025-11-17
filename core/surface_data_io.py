@@ -221,13 +221,16 @@ class SurfaceDataWriter:
             'Conventions': 'CF-1.7',
             'creation_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S %z'),
             'data_content': 'surface_data_time_averaged',
-            'version': 1,
+            'version': 2,  # Updated to version 2 for enhanced naming support
 
             # Time averaging information
             'time_averaging_method': metadata.get('time_averaging_method', 'mean'),
             'time_steps_used': metadata.get('time_steps_used', 0),
             'time_steps_total': metadata.get('time_steps_total', 0),
             'time_steps_corrupted': metadata.get('time_steps_corrupted', 0),
+
+            # Enhanced naming metadata (NEW in version 2)
+            'time_selection_mode': metadata.get('time_selection_mode', 'all_times_average'),
 
             # Domain information
             'domain_type': metadata.get('domain_type', 'unknown'),
@@ -243,6 +246,16 @@ class SurfaceDataWriter:
             'author': metadata.get('author', 'PALMPlot'),
             'institution': metadata.get('institution', ''),
         }
+
+        # Add time range if specified (for time_window mode)
+        if 'time_range_start' in metadata:
+            attrs['time_range_start'] = metadata['time_range_start']
+        if 'time_range_end' in metadata:
+            attrs['time_range_end'] = metadata['time_range_end']
+
+        # Add time index if specified (for single_time mode)
+        if 'time_index' in metadata:
+            attrs['time_index'] = metadata['time_index']
 
         # Add optional attributes
         if 'origin_x' in metadata:

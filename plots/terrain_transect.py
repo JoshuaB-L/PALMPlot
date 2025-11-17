@@ -1022,7 +1022,7 @@ class TerrainTransectPlotter(BasePlotter):
                             domain_type: str,
                             settings: Dict) -> Path:
         """
-        Get path for mask cache file.
+        Get path for mask cache file using enhanced naming convention.
 
         Args:
             case_name: Simulation case name
@@ -1048,7 +1048,47 @@ class TerrainTransectPlotter(BasePlotter):
             max_levels=levels.get('max_levels', 20)
         )
 
-        filename = generate_mask_filename(case_name, domain_type, offsets_parsed)
+        # Get time selection mode and parameters
+        time_mode = settings.get('time_selection_method', 'mean')
+        time_params = {}
+
+        # Map time_selection_method to standardized time_mode
+        if time_mode == 'mean':
+            time_mode_std = 'all_times_average'
+        elif time_mode == 'mean_timeframe':
+            time_mode_std = 'time_window'
+            time_params = {
+                'start': settings.get('time_start', 0),
+                'end': settings.get('time_end', 0)
+            }
+        elif time_mode == 'single_timestep':
+            time_mode_std = 'single_time'
+            time_params = {
+                'hour': settings.get('time_index', 0)
+            }
+        else:
+            # Unknown mode, use default
+            time_mode_std = 'all_times_average'
+
+        # Get building mask setting
+        building_mask = tf_settings.get('buildings_mask', True)
+
+        # Generate enhanced filename
+        try:
+            from ..utils.netcdf_utils import generate_mask_filename_enhanced
+            filename = generate_mask_filename_enhanced(
+                case_name=case_name,
+                domain_type=domain_type,
+                offsets=offsets_parsed,
+                time_mode=time_mode_std,
+                time_params=time_params if time_params else None,
+                building_mask=building_mask
+            )
+        except Exception as e:
+            # Fallback to legacy naming if enhanced generation fails
+            self.logger.warning(f"Failed to generate enhanced filename, using legacy: {e}")
+            from ..utils.netcdf_utils import generate_mask_filename
+            filename = generate_mask_filename(case_name, domain_type, offsets_parsed)
 
         return cache_dir / filename
 
@@ -1085,6 +1125,19 @@ class TerrainTransectPlotter(BasePlotter):
         cache_settings = tf_settings.get('mask_cache', {})
         domain_settings = tf_settings.get(domain_type, {})
 
+        # Get time selection mode and parameters
+        time_mode = settings.get('time_selection_method', 'mean')
+
+        # Map to standardized time_mode
+        if time_mode == 'mean':
+            time_mode_std = 'all_times_average'
+        elif time_mode == 'mean_timeframe':
+            time_mode_std = 'time_window'
+        elif time_mode == 'single_timestep':
+            time_mode_std = 'single_time'
+        else:
+            time_mode_std = 'all_times_average'
+
         metadata = {
             'case_name': case_name,
             'domain_type': domain_type,
@@ -1098,7 +1151,18 @@ class TerrainTransectPlotter(BasePlotter):
             'ny': coordinates['y'].size,
             'resolution': settings.get('resolution', 0.0),
             'author': 'PALMPlot',
+            # Enhanced naming metadata (NEW)
+            'time_selection_mode': time_mode_std,
         }
+
+        # Add time range if time_window mode
+        if time_mode_std == 'time_window':
+            metadata['time_range_start'] = settings.get('time_start', 0)
+            metadata['time_range_end'] = settings.get('time_end', 0)
+
+        # Add time index if single_time mode
+        if time_mode_std == 'single_time':
+            metadata['time_index'] = settings.get('time_index', 0)
 
         # Add origin info from static dataset if available
         if static_dataset is not None:
@@ -1154,12 +1218,47 @@ class TerrainTransectPlotter(BasePlotter):
             self.logger.warning("Mask caching modules not available, cannot load mask")
             return None
 
-        # Find mask file
+        # Find mask file (try enhanced naming first, then fall back to legacy)
         tf_settings = settings.get('terrain_following', {})
         cache_settings = tf_settings.get('mask_cache', {})
         cache_dir = Path(cache_settings.get('cache_directory', './cache/terrain_masks'))
 
-        mask_path = find_existing_mask_file(cache_dir, case_name, domain_type)
+        # Get time mode and parameters
+        time_mode = settings.get('time_selection_method', 'mean')
+
+        # Map to standardized time_mode
+        if time_mode == 'mean':
+            time_mode_std = 'all_times_average'
+            time_params = None
+        elif time_mode == 'mean_timeframe':
+            time_mode_std = 'time_window'
+            time_params = {
+                'start': settings.get('time_start', 0),
+                'end': settings.get('time_end', 0)
+            }
+        elif time_mode == 'single_timestep':
+            time_mode_std = 'single_time'
+            time_params = {
+                'hour': settings.get('time_index', 0)
+            }
+        else:
+            time_mode_std = 'all_times_average'
+            time_params = None
+
+        # Get building mask setting
+        building_mask = tf_settings.get('buildings_mask', True)
+
+        # Try enhanced naming first
+        from ..utils.netcdf_utils import find_existing_mask_file_enhanced
+        mask_path = find_existing_mask_file_enhanced(
+            cache_dir=cache_dir,
+            case_name=case_name,
+            domain_type=domain_type,
+            time_mode=time_mode_std,
+            time_params=time_params,
+            building_mask=building_mask,
+            fallback_to_legacy=True  # Enable fallback to legacy naming
+        )
 
         if mask_path is None:
             self.logger.info(f"No cached mask found for {case_name} ({domain_type})")
@@ -1179,12 +1278,41 @@ class TerrainTransectPlotter(BasePlotter):
                 validation_settings=validation_settings
             )
 
+            # Get time mode and parameters for validation
+            time_mode = settings.get('time_selection_method', 'mean')
+
+            # Map to standardized time_mode
+            if time_mode == 'mean':
+                time_mode_std = 'all_times_average'
+                time_params = None
+            elif time_mode == 'mean_timeframe':
+                time_mode_std = 'time_window'
+                time_params = {
+                    'start': settings.get('time_start', 0),
+                    'end': settings.get('time_end', 0)
+                }
+            elif time_mode == 'single_timestep':
+                time_mode_std = 'single_time'
+                time_params = {
+                    'hour': settings.get('time_index', 0)
+                }
+            else:
+                time_mode_std = 'all_times_average'
+                time_params = None
+
+            # Get building mask setting
+            tf_settings = settings.get('terrain_following', {})
+            building_mask = tf_settings.get('buildings_mask', True)
+
             # Check compatibility
             is_compatible, issues = reader.check_mask_compatibility(
                 mask_metadata=result['metadata'],
                 expected_grid_size=expected_grid_size,
                 expected_domain=domain_type,
-                validation_settings=validation_settings
+                validation_settings=validation_settings,
+                expected_time_mode=time_mode_std,
+                expected_time_params=time_params,
+                expected_building_mask=building_mask
             )
 
             if not is_compatible:
@@ -2676,19 +2804,65 @@ class TerrainTransectPlotter(BasePlotter):
             # Now var_data_time_avg has shape [zu_3d, y, x] (time dimension removed)
 
             # STEP 2: LOAD BUILDING MASK (if needed)
-            building_mask_2d = None
-            if buildings_mask and static_dataset is not None and 'buildings_2d' in static_dataset:
-                building_mask_2d = static_dataset['buildings_2d'].values > 0
-                n_building_cells = np.sum(building_mask_2d)
-                total_cells = building_mask_2d.size
-                pct_buildings = 100 * n_building_cells / total_cells
+            # Get mask mode: 'static_mask' or 'natural_mask' (default)
+            tf_settings = settings.get('terrain_following', {})
+            buildings_mask_mode = tf_settings.get('buildings_mask_mode', 'natural_mask')
 
-                msg = f"  Building mask loaded: {n_building_cells}/{total_cells} cells ({pct_buildings:.1f}%) are buildings"
-                print(msg)
-                self.logger.info(msg)
-            elif buildings_mask and (static_dataset is None or 'buildings_2d' not in static_dataset):
-                self.logger.warning("buildings_mask=True but buildings_2d not available in static dataset")
-                buildings_mask = False  # Disable mask if data not available
+            building_mask_2d = None
+            building_heights_2d = None
+
+            if buildings_mask and buildings_mask_mode == 'static_mask':
+                # STATIC MASK MODE: Use 2D boolean mask from buildings_2d (old behavior)
+                # This applies a fixed 2D mask at ALL vertical levels
+                if static_dataset is not None and 'buildings_2d' in static_dataset:
+                    building_mask_2d = static_dataset['buildings_2d'].values > 0
+                    n_building_cells = np.sum(building_mask_2d)
+                    total_cells = building_mask_2d.size
+                    pct_buildings = 100 * n_building_cells / total_cells
+
+                    msg = f"  Building mask mode: STATIC (2D mask from buildings_2d)"
+                    print(msg)
+                    self.logger.info(msg)
+                    msg = f"  Building cells: {n_building_cells}/{total_cells} ({pct_buildings:.1f}%)"
+                    print(msg)
+                    self.logger.info(msg)
+                else:
+                    self.logger.warning("buildings_mask_mode='static_mask' but buildings_2d not available in static dataset")
+                    self.logger.warning("Falling back to natural_mask mode")
+                    buildings_mask_mode = 'natural_mask'
+
+            if buildings_mask and buildings_mask_mode == 'natural_mask':
+                # NATURAL MASK MODE: Height-aware masking using building heights
+                # Masked regions are determined by:
+                # 1. Fill values in atmospheric data (primary)
+                # 2. Extraction height < building roof height (secondary, ensures all buildings masked)
+                # This removes artifacts while maintaining physically accurate masking
+                if static_dataset is not None and 'buildings_2d' in static_dataset:
+                    building_heights_2d = static_dataset['buildings_2d'].values
+                    n_building_cells = np.sum(building_heights_2d > 0)
+                    total_cells = building_heights_2d.size
+                    pct_buildings = 100 * n_building_cells / total_cells
+                    max_building_height = np.max(building_heights_2d)
+
+                    msg = f"  Building mask mode: NATURAL (height-aware fill-value based)"
+                    print(msg)
+                    self.logger.info(msg)
+                    msg = f"  Building cells: {n_building_cells}/{total_cells} ({pct_buildings:.1f}%)"
+                    print(msg)
+                    self.logger.info(msg)
+                    msg = f"  Max building height: {max_building_height:.1f}m"
+                    print(msg)
+                    self.logger.info(msg)
+                    msg = f"  Masked regions: fill values + cells inside buildings (z < roof height)"
+                    print(msg)
+                    self.logger.info(msg)
+                else:
+                    msg = f"  Building mask mode: NATURAL (fill-value based only)"
+                    print(msg)
+                    self.logger.info(msg)
+                    msg = f"  Masked regions determined by atmospheric data fill values only"
+                    print(msg)
+                    self.logger.info(msg)
 
             # STEP 3: TERRAIN-FOLLOWING ITERATION
             msg = f"\n=== VERTICAL ITERATION (TERRAIN-FOLLOWING) ==="
@@ -2719,15 +2893,35 @@ class TerrainTransectPlotter(BasePlotter):
                 # Find cells that are:
                 # 1. Currently unfilled (NaN in filled_array)
                 # 2. Have valid data at this level (not fill_value)
-                # 3. Not masked by buildings (if buildings_mask=True)
+                # 3. Not masked by buildings (mode-dependent)
 
                 currently_unfilled = np.isnan(filled_array)
                 has_valid_data = ~self._is_fill_value(slice_2d, fill_value)
 
-                # If buildings_mask=True, exclude building locations
-                if buildings_mask and building_mask_2d is not None:
+                # Apply building mask based on mode
+                if buildings_mask and buildings_mask_mode == 'static_mask' and building_mask_2d is not None:
+                    # STATIC MODE: Apply 2D mask at all heights
                     not_building = ~building_mask_2d
+                elif buildings_mask and buildings_mask_mode == 'natural_mask' and building_heights_2d is not None:
+                    # NATURAL MODE: Mask cells where buildings exist
+                    # buildings_2d contains:
+                    # - 0 where there are NO buildings (open areas)
+                    # - >0 where there ARE buildings (building footprint)
+                    # - NaN where undefined (treat as open areas)
+
+                    # Mask only where buildings exist (buildings_2d > 0)
+                    # Allow where: no buildings (==0), NaN, or <=0
+                    # Use ~(buildings_2d > 0) to handle NaN correctly
+                    # (NaN > 0 returns False, so ~False = True, allowing NaN cells)
+                    not_building = ~(building_heights_2d > 0)
+
+                    # Also respect fill values (primary masking)
+                    # The combination ensures:
+                    # - Fill values always masked (has_valid_data check)
+                    # - Building locations masked (buildings_2d > 0)
+                    # - Open areas and NaN cells allowed
                 else:
+                    # NO MASK or natural mode without building data: Rely on fill values only
                     not_building = np.ones_like(currently_unfilled, dtype=bool)
 
                 # Combine all conditions

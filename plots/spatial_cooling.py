@@ -23,10 +23,16 @@ try:
 except ImportError:
     from core.variable_metadata import VariableMetadata
 
+# Import terrain-following extraction from terrain_transect
+try:
+    from .terrain_transect import TerrainTransectPlotter
+except ImportError:
+    from plots.terrain_transect import TerrainTransectPlotter
+
 
 class SpatialCoolingPlotter(BasePlotter):
     """Creates visualizations for spatial cooling patterns"""
-    
+
     def __init__(self, config: Dict, output_manager):
         """
         Initialize spatial cooling plotter
@@ -41,27 +47,346 @@ class SpatialCoolingPlotter(BasePlotter):
         # Initialize VariableMetadata for dynamic variable handling
         self.var_metadata = VariableMetadata(config, self.logger)
 
-        # Cache directory from config (if available)
+        # Create helper instance for terrain-following extraction
+        # This allows us to borrow methods from terrain_transect.py
+        self._terrain_helper = TerrainTransectPlotter(config, output_manager)
+
+        # Get cache directories from GLOBAL terrain_following config (NEW)
         self.terrain_mask_cache_dir = None
+        self.surface_data_cache_dir = None
+
         try:
-            # Try to get cache directory from fig_6 settings (if they exist)
-            fig6_settings = config.get('plots', {}).get('figures', {}).get('fig_6', {}).get('settings', {})
-            if fig6_settings:
-                tf_settings = fig6_settings.get('terrain_following', {})
-                mask_cache_settings = tf_settings.get('mask_cache', {})
-                if mask_cache_settings.get('enabled', False):
-                    cache_dir = mask_cache_settings.get('cache_directory')
+            # Get global terrain_following settings
+            tf_global = config.get('plots', {}).get('terrain_following', {})
+
+            if tf_global:
+                # Get terrain mask cache directory
+                mask_cache = tf_global.get('mask_cache', {})
+                if mask_cache.get('enabled', False):
+                    cache_dir = mask_cache.get('cache_directory')
                     if cache_dir:
-                        self.terrain_mask_cache_dir = Path(cache_dir)
-                        print(f"[fig_3] Terrain mask cache directory detected: {self.terrain_mask_cache_dir}")
-                        self.logger.debug(f"Terrain mask cache directory: {self.terrain_mask_cache_dir}")
-                else:
-                    print(f"[fig_3] Mask cache not enabled in fig_6 config")
+                        self.terrain_mask_cache_dir = Path(cache_dir).expanduser().resolve()
+                        self.logger.info(f"Terrain mask cache directory: {self.terrain_mask_cache_dir}")
+
+                # Get surface data cache directory
+                surface_cache = tf_global.get('surface_data_cache', {})
+                if surface_cache.get('enabled', False):
+                    cache_dir = surface_cache.get('cache_directory')
+                    if cache_dir:
+                        self.surface_data_cache_dir = Path(cache_dir).expanduser().resolve()
+                        self.logger.info(f"Surface data cache directory: {self.surface_data_cache_dir}")
             else:
-                print(f"[fig_3] No fig_6 settings found in config")
+                self.logger.warning("No global terrain_following config found, caching disabled")
         except Exception as e:
-            print(f"[fig_3] Could not determine cache directory: {e}")
-            self.logger.debug(f"Could not determine cache directory: {e}")
+            self.logger.warning(f"Could not determine cache directories: {e}")
+
+    # ========================================================================
+    # Terrain-Following Extraction Methods (delegate to terrain_transect.py)
+    # ========================================================================
+
+    def _extract_terrain_following_2d(
+        self,
+        dataset: xr.Dataset,
+        static_dataset: xr.Dataset,
+        domain_type: str,
+        variable: str,
+        settings: Dict
+    ) -> Tuple[np.ndarray, str, bool]:
+        """
+        Extract 2D terrain-following slice by delegating to terrain_transect.py.
+
+        This method borrows the proven terrain-following extraction logic
+        from fig_6 (terrain_transect.py) and applies it to fig_3's 2D spatial plots.
+
+        Args:
+            dataset: xarray Dataset containing variable data
+            static_dataset: xarray Dataset containing topography
+            domain_type: 'parent' or 'child'
+            variable: Variable name (config key)
+            settings: Extraction settings dict (must include terrain_following config)
+
+        Returns:
+            Tuple of (2D array [y, x], variable_name, needs_kelvin_conversion)
+
+        Raises:
+            ValueError: If extraction fails
+        """
+        self.logger.info(f"Delegating 2D terrain-following extraction to terrain_helper")
+
+        # Delegate to terrain_transect's _extract_terrain_following() method
+        # with output_mode='2d' to get full spatial field
+        try:
+            data_2d, var_name, needs_conversion = self._terrain_helper._extract_terrain_following(
+                dataset=dataset,
+                static_dataset=static_dataset,
+                domain_type=domain_type,
+                variable=variable,
+                buildings_mask=settings.get('terrain_following', {}).get('buildings_mask', True),
+                output_mode='2d',  # Request 2D field (not transect)
+                settings=settings
+            )
+
+            self.logger.info(f"Successfully extracted 2D terrain-following data for {variable}")
+            self.logger.info(f"  Shape: {data_2d.shape}, Variable: {var_name}, Needs K→C: {needs_conversion}")
+
+            return data_2d, var_name, needs_conversion
+
+        except Exception as e:
+            self.logger.error(f"Failed to extract terrain-following data: {e}")
+            raise ValueError(f"Terrain-following extraction failed for {variable}: {e}")
+
+    def _is_pcm_variable(self, variable: str, dataset: xr.Dataset) -> bool:
+        """
+        Check if variable is a PCM (Plant Canopy Model) variable.
+
+        Delegates to terrain_helper for consistent PCM detection.
+
+        Args:
+            variable: Variable name (config key)
+            dataset: xarray Dataset to check
+
+        Returns:
+            bool: True if variable uses zpc_3d coordinate (PCM variable)
+        """
+        return self._terrain_helper._is_pcm_variable(variable, dataset)
+
+    # ========================================================================
+    # Time Window and Cache Key Management (NEW)
+    # ========================================================================
+
+    def _determine_time_mode(self, hour) -> Tuple[str, Optional[Dict]]:
+        """
+        Determine standardized time_mode and parameters from hour specification.
+
+        Args:
+            hour: Time specification - can be:
+                  - int: single hour of day (0-23) → 'single_time'
+                  - list [start, end]: simulation hour range → 'time_window'
+                  - None: all times → 'all_times_average'
+
+        Returns:
+            Tuple of (time_mode: str, time_params: Optional[Dict])
+
+            Examples:
+                hour=14 → ('single_time', {'hour': 14})
+                hour=[30, 42] → ('time_window', {'start': 30, 'end': 42})
+                hour=None → ('all_times_average', None)
+        """
+        if hour is None:
+            return 'all_times_average', None
+
+        elif isinstance(hour, list) and len(hour) == 2:
+            # Time window: [start_hour, end_hour]
+            return 'time_window', {'start': hour[0], 'end': hour[1]}
+
+        elif isinstance(hour, int):
+            # Single hour of day
+            return 'single_time', {'hour': hour}
+
+        else:
+            # Default fallback
+            self.logger.warning(f"Unexpected hour format: {hour}, defaulting to all_times_average")
+            return 'all_times_average', None
+
+    def _load_from_enhanced_cache(
+        self,
+        dataset: xr.Dataset,
+        static_dataset: xr.Dataset,
+        variable: str,
+        domain_type: str,
+        time_mode: str,
+        time_params: Optional[Dict],
+        settings: Dict
+    ) -> Optional[np.ndarray]:
+        """
+        Load terrain-following data from enhanced cache with time_mode and building_mask.
+
+        Args:
+            dataset: xarray Dataset containing variable data
+            static_dataset: xarray Dataset with topography
+            variable: Variable name (config key)
+            domain_type: 'parent' or 'child'
+            time_mode: 'all_times_average', 'time_window', or 'single_time'
+            time_params: Time parameters dict (start/end for time_window, hour for single_time)
+            settings: Extraction settings dict
+
+        Returns:
+            2D numpy array if cache hit, None if cache miss
+        """
+        if self.terrain_mask_cache_dir is None:
+            self.logger.debug("Terrain mask cache disabled")
+            return None
+
+        try:
+            # Get case name
+            case_name = self._get_case_name_from_dataset(dataset)
+            if case_name is None:
+                self.logger.debug("Could not determine case name for cache lookup")
+                return None
+
+            # Get building mask setting
+            building_mask = settings.get('terrain_following', {}).get('buildings_mask', True)
+
+            # Import enhanced cache utilities
+            try:
+                from ..utils.netcdf_utils import find_existing_mask_file_enhanced
+            except ImportError:
+                from utils.netcdf_utils import find_existing_mask_file_enhanced
+
+            # Try to find enhanced cache file
+            cache_file = find_existing_mask_file_enhanced(
+                cache_dir=self.terrain_mask_cache_dir,
+                case_name=case_name,
+                domain_type=domain_type,
+                time_mode=time_mode,
+                time_params=time_params,
+                building_mask=building_mask,
+                fallback_to_legacy=True  # Enable fallback to old naming
+            )
+
+            if cache_file is None:
+                self.logger.debug(
+                    f"Cache miss: {case_name}, {domain_type}, "
+                    f"time_mode={time_mode}, building_mask={building_mask}"
+                )
+                return None
+
+            # Load and extract variable
+            self.logger.info(f"Loading from enhanced cache: {cache_file.name}")
+
+            # Get PALM variable name
+            palm_name = self.var_metadata.get_palm_name(variable)
+
+            cache_ds = xr.open_dataset(cache_file)
+
+            if palm_name not in cache_ds.data_vars:
+                self.logger.debug(f"Variable '{palm_name}' not in cache file {cache_file.name}")
+                cache_ds.close()
+                return None
+
+            # Extract data at z_offset
+            z_offset = settings.get('terrain_mask_height_z', 0)
+            var_data = cache_ds[palm_name]
+
+            if 'ku_above_surf' in var_data.dims:
+                var_data = var_data.sel(ku_above_surf=z_offset)
+            else:
+                self.logger.warning(f"ku_above_surf dimension not found in cached {palm_name}")
+                cache_ds.close()
+                return None
+
+            # Squeeze out time dimension if present
+            if 'time' in var_data.dims:
+                var_data = var_data.isel(time=0)
+
+            data_array = var_data.values
+            cache_ds.close()
+
+            # Clean invalid data
+            data_array = self._clean_invalid_data(data_array, variable)
+
+            self.logger.info(f"✓ Successfully loaded {variable} from enhanced cache")
+            return data_array
+
+        except Exception as e:
+            self.logger.debug(f"Error loading from enhanced cache: {e}")
+            return None
+
+    def _save_to_enhanced_cache(
+        self,
+        data_2d: np.ndarray,
+        dataset: xr.Dataset,
+        static_dataset: xr.Dataset,
+        variable: str,
+        domain_type: str,
+        time_mode: str,
+        time_params: Optional[Dict],
+        settings: Dict
+    ) -> bool:
+        """
+        Save terrain-following data to enhanced cache.
+
+        NOTE: Cache saving is handled automatically by terrain_helper's
+        _extract_terrain_following() method. When cache mode is 'auto' or 'save',
+        the terrain_helper computes terrain masks for all requested offset levels
+        and saves them to the cache directory specified in the config.
+
+        This method is intentionally a no-op because:
+        1. terrain_helper already saves the full 3D mask (multiple offset levels)
+        2. We only extract a single 2D slice here (one offset level)
+        3. Saving individual slices would create redundant cache files
+
+        The cache saving happens inside _extract_terrain_following() around line 3183
+        of terrain_transect.py, which is called by our _extract_terrain_following_2d()
+        delegation method.
+
+        Args:
+            data_2d: 2D data array to save (unused)
+            dataset: Original dataset (unused)
+            static_dataset: Static dataset with topography (unused)
+            variable: Variable name (unused)
+            domain_type: 'parent' or 'child' (unused)
+            time_mode: Time mode string (unused)
+            time_params: Time parameters dict (unused)
+            settings: Extraction settings (unused)
+
+        Returns:
+            False (cache saving handled by terrain_helper)
+        """
+        # Cache saving is automatically handled by terrain_helper during extraction
+        # No additional action needed here
+        self.logger.debug("Cache saving handled by terrain_helper during extraction")
+        return False
+
+    # ========================================================================
+    # Utility Methods
+    # ========================================================================
+
+    def _load_static_dataset(self, dataset: xr.Dataset) -> Optional[xr.Dataset]:
+        """
+        Load the corresponding static dataset for a given dataset.
+
+        Args:
+            dataset: xarray Dataset to find corresponding static file for
+
+        Returns:
+            Static dataset or None if not found
+        """
+        try:
+            # Extract static file path from dataset source
+            source = dataset.encoding.get('source', '')
+            if not source:
+                self.logger.warning("Could not determine static file path - no source in dataset")
+                return None
+
+            # Convert path to find corresponding static file
+            # Example: .../OUTPUT/merged_files/case_av_3d_merged.nc -> .../INPUT/case_static
+            source_path = Path(source)
+            case_dir = source_path.parent.parent.parent  # Go up from OUTPUT/merged_files/
+
+            # Determine case name and domain suffix
+            filename = source_path.stem  # e.g., "thf_base_2018080700_av_3d_N02_merged"
+            is_child = 'N02' in filename or '_n02' in filename.lower()
+
+            # Extract case name (remove _av_3d, _N02, _merged, etc.)
+            case_name = filename.split('_av_')[0]  # Get part before _av_3d
+
+            # Build static file path
+            domain_suffix = '_N02' if is_child else ''
+            static_file = case_dir / 'INPUT' / f"{case_name}_static{domain_suffix}"
+
+            if not static_file.exists():
+                self.logger.warning(f"Static file not found: {static_file}")
+                return None
+
+            # Load static dataset
+            static_ds = xr.open_dataset(static_file)
+            self.logger.info(f"Loaded static dataset from {static_file.name}")
+            return static_ds
+
+        except Exception as e:
+            self.logger.warning(f"Error loading static dataset: {str(e)}")
+            return None
 
     def _get_case_name_from_dataset(self, dataset: xr.Dataset) -> Optional[str]:
         """
@@ -525,11 +850,15 @@ class SpatialCoolingPlotter(BasePlotter):
 
                 if not any(hour_mask):
                     self.logger.warning(f"No data found for hour {hour}")
-                    return var_data.isel(zu_3d=z_idx).mean(dim='time').values
+                    result = var_data.isel(zu_3d=z_idx).mean(dim='time').values
+                    return self._clean_invalid_data(result, variable)
 
                 # Get variable data at specified hour and height
                 var_hourly = var_data.isel(time=hour_mask, zu_3d=z_idx)
                 var_field = var_hourly.mean(dim='time').values
+
+            # Clean invalid data (convert zeros to NaN for proper masking)
+            var_field = self._clean_invalid_data(var_field, variable)
 
             return var_field
 
@@ -540,7 +869,10 @@ class SpatialCoolingPlotter(BasePlotter):
     def _extract_spatial_data_terrain_following(self, dataset: xr.Dataset, variable: str,
                                                hour, z_offset: int = 0) -> np.ndarray:
         """
-        Extract 2D variable field at specific hour or time window using terrain-following coordinates
+        Extract 2D variable field at specific hour or time window using terrain-following coordinates.
+
+        This method now uses the enhanced cache system with time_mode detection and
+        delegates extraction to terrain_helper for consistency with fig_6.
 
         Args:
             dataset: xarray dataset containing variable data
@@ -552,139 +884,115 @@ class SpatialCoolingPlotter(BasePlotter):
             2D numpy array of variable values
         """
         try:
-            # Determine if this is child domain
+            # Determine domain type
             is_child = 'N02' in dataset.encoding.get('source', '')
+            domain_type = 'child' if is_child else 'parent'
 
-            # NOTE: Cache can only be used for time-averaged data (not specific hours)
-            # The cache files are time-averaged, so we can't use them for specific hour extraction
-            # For now, we'll proceed with the existing logic and log that cache isn't applicable
+            # Determine time_mode and parameters from hour specification
+            time_mode, time_params = self._determine_time_mode(hour)
 
-            if not isinstance(hour, list):
-                self.logger.debug(f"Cache not applicable for specific hour extraction (hour={hour})")
+            self.logger.info(
+                f"Extracting {variable} in terrain-following mode: "
+                f"domain={domain_type}, time_mode={time_mode}, z_offset={z_offset}"
+            )
 
+            # Get settings (need terrain_following config for building_mask)
+            settings = self._get_plot_settings('fig_3')
+            settings['terrain_mask_height_z'] = z_offset  # Inject z_offset into settings
 
-            # Get variable data using VariableMetadata
-            var_data, var_name = self.var_metadata.find_variable_in_dataset(dataset, variable)
-            self.logger.debug(f"Found variable '{var_name}' for terrain-following extraction")
-
-            # Check if this is a PCM variable (uses zpc_3d coordinate)
-            is_pcm = 'zpc_3d' in var_data.dims
-            z_dim = 'zpc_3d' if is_pcm else 'zu_3d'
-
-            # Get or compute terrain surface coordinate (ku_above_surf)
-            if 'ku_above_surf' in dataset.coords or 'ku_above_surf' in dataset.data_vars:
-                # Use existing ku_above_surf from dataset (e.g., from cached files)
-                ku_above_surf = dataset['ku_above_surf'].values
-                self.logger.info("Using existing ku_above_surf from dataset")
+            # CRITICAL FIX: Merge global terrain_following config into settings
+            # The terrain_helper needs the full terrain_following config with cache settings
+            global_tf_config = self.config['plots'].get('terrain_following', {})
+            if 'terrain_following' not in settings:
+                # Use global config as base
+                settings['terrain_following'] = global_tf_config.copy()
             else:
-                # Compute ku_above_surf on-the-fly from topography
-                self.logger.info(f"Computing terrain-following mask for {z_dim}")
-                ku_above_surf = self._compute_terrain_following_mask(dataset, z_dim)
+                # Merge fig-specific overrides with global defaults
+                merged_tf = global_tf_config.copy()
+                merged_tf.update(settings['terrain_following'])
+                settings['terrain_following'] = merged_tf
 
-                if ku_above_surf is None:
-                    # If terrain-following computation fails, fall back to absolute slice
-                    self.logger.warning("Terrain-following computation failed, falling back to absolute slice")
-                    is_child = 'N02' in dataset.encoding.get('source', '')
-                    z_idx = 21 if is_child else 25
-                    z_idx += z_offset
+            self.logger.debug(f"Merged terrain_following config: cache enabled={settings['terrain_following'].get('mask_cache', {}).get('enabled', False)}")
 
-                    # Handle time selection
-                    if isinstance(hour, list) and len(hour) == 2:
-                        # Time range
-                        start_hour, end_hour = hour
-                        time_seconds = dataset['time'].values.astype('timedelta64[s]').astype(float)
-                        time_hours = time_seconds / 3600.0
-                        time_mask = (time_hours >= start_hour) & (time_hours <= end_hour)
-                    else:
-                        # Single hour - handle both datetime and timedelta formats
-                        time_values = dataset['time'].values
-                        if np.issubdtype(time_values.dtype, np.timedelta64):
-                            reference_date = pd.Timestamp('2018-08-07 00:00:00')
-                            time_pd = reference_date + pd.to_timedelta(time_values)
-                        else:
-                            time_pd = pd.to_datetime(time_values)
-                        time_mask = time_pd.hour == hour
+            # STEP 1: Try loading from enhanced cache
+            cached_data = self._load_from_enhanced_cache(
+                dataset=dataset,
+                static_dataset=self._load_static_dataset(dataset),
+                variable=variable,
+                domain_type=domain_type,
+                time_mode=time_mode,
+                time_params=time_params,
+                settings=settings
+            )
 
-                    if not any(time_mask):
-                        return var_data.isel({z_dim: z_idx}).mean(dim='time').values
+            if cached_data is not None:
+                self.logger.info(f"✓ Using cached data for {variable} (time_mode={time_mode})")
+                return cached_data
 
-                    var_selected = var_data.isel(time=time_mask, **{z_dim: z_idx})
-                    result = var_selected.mean(dim='time').values
+            # STEP 2: Cache miss - delegate extraction to terrain_helper
+            self.logger.info(f"Cache miss - delegating extraction to terrain_helper")
 
-                    # Clean invalid data
-                    result = self._clean_invalid_data(result, variable)
-                    return result
+            # We need to handle time selection BEFORE delegating
+            # The terrain_helper expects settings with time selection info at ROOT level
+            # CRITICAL FIX: Set parameters at root level, NOT inside terrain_following dict
 
-            # Handle time selection
-            if isinstance(hour, list) and len(hour) == 2:
-                # Time range: [start_hour, end_hour] in simulation hours
-                start_hour, end_hour = hour
-                self.logger.info(f"Terrain-following extraction for time window: sim hours {start_hour}-{end_hour}")
+            # Update settings with time selection method (AT ROOT LEVEL)
+            if time_mode == 'all_times_average':
+                settings['time_selection_method'] = 'mean'
+            elif time_mode == 'time_window':
+                settings['time_selection_method'] = 'mean_timeframe'
+                settings['time_start'] = time_params['start']
+                settings['time_end'] = time_params['end']
+                self.logger.info(f"Set time window: hours {time_params['start']}-{time_params['end']}")
+            elif time_mode == 'single_time':
+                settings['time_selection_method'] = 'single_timestep'
+                settings['time_index'] = time_params['hour']
+                self.logger.info(f"Set single time: hour {time_params['hour']}")
 
-                # Convert time to hours, handling NaT values safely
-                time_seconds = dataset['time'].values.astype('timedelta64[s]').astype(float)
-                time_hours = time_seconds / 3600.0
+            # Extract case name from dataset encoding for cache naming
+            case_name = dataset.encoding.get('source', 'unknown')
+            # Remove path and extension to get clean case name
+            if '/' in case_name:
+                case_name = case_name.split('/')[-1]
+            if '.nc' in case_name:
+                case_name = case_name.replace('.nc', '')
+            settings['case_name'] = case_name
 
-                # Filter out NaN/inf values from time conversion issues
-                valid_time_mask = np.isfinite(time_hours) & (time_hours >= 0)
-                time_mask = valid_time_mask & (time_hours >= start_hour) & (time_hours <= end_hour)
+            # Load static dataset if not already loaded
+            static_dataset = self._load_static_dataset(dataset)
 
-                if not any(time_mask):
-                    self.logger.warning(f"No data found for time range {start_hour}-{end_hour}")
-                    var_time_avg = var_data.mean(dim='time')
-                else:
-                    var_window = var_data.isel(time=time_mask)
-                    var_time_avg = var_window.mean(dim='time')
+            # Delegate to terrain_helper for extraction
+            data_2d, var_name, needs_conversion = self._extract_terrain_following_2d(
+                dataset=dataset,
+                static_dataset=static_dataset,
+                domain_type=domain_type,
+                variable=variable,
+                settings=settings
+            )
 
+            # Apply Kelvin to Celsius conversion if needed
+            if needs_conversion:
+                data_2d = data_2d - 273.15
+                self.logger.info(f"Converted {var_name} from Kelvin to Celsius")
+
+            # STEP 3: Save to enhanced cache for future use
+            save_success = self._save_to_enhanced_cache(
+                data_2d=data_2d,
+                dataset=dataset,
+                static_dataset=static_dataset,
+                variable=variable,
+                domain_type=domain_type,
+                time_mode=time_mode,
+                time_params=time_params,
+                settings=settings
+            )
+
+            if save_success:
+                self.logger.info(f"✓ Saved extraction to enhanced cache")
             else:
-                # Single hour: hour of day (0-23)
-                # Handle both datetime and timedelta formats
-                time_values = dataset['time'].values
+                self.logger.debug(f"Cache saving skipped or failed")
 
-                if np.issubdtype(time_values.dtype, np.timedelta64):
-                    # Time is timedelta since reference (2018-08-07 00:00:00)
-                    reference_date = pd.Timestamp('2018-08-07 00:00:00')
-                    time_pd = reference_date + pd.to_timedelta(time_values)
-                else:
-                    # Time is already datetime
-                    time_pd = pd.to_datetime(time_values)
-
-                hour_mask = time_pd.hour == hour
-
-                if not any(hour_mask):
-                    self.logger.warning(f"No data found for hour {hour}")
-                    var_time_avg = var_data.mean(dim='time')
-                else:
-                    var_hourly = var_data.isel(time=hour_mask)
-                    var_time_avg = var_hourly.mean(dim='time')
-
-            # Get dimensions
-            nz, ny, nx = var_time_avg.shape
-
-            # Initialize result array
-            result = np.full((ny, nx), np.nan)
-
-            # Convert to numpy for faster access
-            data_array = var_time_avg.values
-
-            # For PCM variables: apply zero-to-NaN conversion
-            if is_pcm:
-                zero_threshold = 1e-10
-                data_array = np.where(np.abs(data_array) > zero_threshold, data_array, np.nan)
-
-            # Extract terrain-following data
-            for iy in range(ny):
-                for ix in range(nx):
-                    terrain_idx = int(ku_above_surf[iy, ix])
-                    target_idx = terrain_idx + z_offset
-
-                    if 0 <= target_idx < nz:
-                        result[iy, ix] = data_array[target_idx, iy, ix]
-
-            # Clean invalid data before returning
-            result = self._clean_invalid_data(result, variable)
-
-            return result
+            return data_2d
 
         except Exception as e:
             self.logger.error(f"Error extracting terrain-following data for variable '{variable}': {str(e)}")
@@ -718,33 +1026,62 @@ class SpatialCoolingPlotter(BasePlotter):
             self.logger.info(f"Using slice extraction at height={height}m")
             return self._extract_spatial_data(dataset, variable, hour, height)
 
-    def _calculate_cooling_effect(self, temp_field: np.ndarray, 
+    def _calculate_cooling_effect(self, temp_field: np.ndarray,
                                 base_field: np.ndarray) -> np.ndarray:
         """
         Calculate cooling effect ensuring proper dimension alignment
-        
+
         Args:
             temp_field: Temperature field from simulation
             base_field: Temperature field from base case
-            
+
         Returns:
             Cooling effect field (base - simulation)
         """
         # Ensure both fields have the same shape
         if temp_field.shape != base_field.shape:
             self.logger.warning(f"Shape mismatch: {temp_field.shape} vs {base_field.shape}")
-            
+
             # Try to align by taking the minimum dimensions
             min_x = min(temp_field.shape[0], base_field.shape[0])
             min_y = min(temp_field.shape[1], base_field.shape[1])
-            
+
             temp_field = temp_field[:min_x, :min_y]
             base_field = base_field[:min_x, :min_y]
-            
+
         # Calculate cooling (positive values mean cooling)
         cooling = base_field - temp_field
-        
+
         return cooling
+
+    def _nan_aware_gaussian_filter(self, data: np.ndarray, sigma: float) -> np.ndarray:
+        """
+        Apply Gaussian smoothing that preserves NaN boundaries and doesn't expand masked regions
+
+        Args:
+            data: 2D array with potential NaN values
+            sigma: Gaussian kernel sigma
+
+        Returns:
+            Smoothed array with NaN regions preserved
+        """
+        # Create mask of valid (non-NaN) data
+        valid_mask = ~np.isnan(data)
+
+        # Replace NaN with zeros for filtering
+        data_filled = np.where(valid_mask, data, 0.0)
+
+        # Apply gaussian filter to data and to the mask
+        smoothed_data = gaussian_filter(data_filled, sigma=sigma)
+        smoothed_mask = gaussian_filter(valid_mask.astype(float), sigma=sigma)
+
+        # Avoid division by zero: where smoothed_mask is very small, keep as NaN
+        result = np.where(smoothed_mask > 0.01, smoothed_data / smoothed_mask, np.nan)
+
+        # Preserve original NaN regions: if original was NaN, keep it NaN
+        result = np.where(valid_mask, result, np.nan)
+
+        return result
         
     def _create_spatial_comparison(self, data: Dict, variable: str, hour,
                                   settings: Dict, title: str) -> plt.Figure:
@@ -816,7 +1153,7 @@ class SpatialCoolingPlotter(BasePlotter):
             if base_field is not None:
                 im = axes[i, 0].imshow(base_field, cmap=absolute_params['cmap'],
                                       vmin=absolute_params['vmin'], vmax=absolute_params['vmax'],
-                                      origin='lower', aspect='equal')
+                                      origin='lower', aspect='equal', interpolation='none')
                 axes[i, 0].set_title("Base Case" if i == 0 else "")
                 axes[i, 0].set_ylabel(f"{age} years", fontsize=12, weight='bold')
             else:
@@ -843,15 +1180,16 @@ class SpatialCoolingPlotter(BasePlotter):
                             if base_field is not None:
                                 diff_field = self._calculate_cooling_effect(field, base_field)
 
-                                # Apply smoothing if configured
+                                # Apply NaN-aware smoothing if configured
                                 if self.config['analysis']['spatial']['grid_interpolation']:
                                     sigma = self.config['analysis']['spatial']['smoothing_sigma']
-                                    diff_field = gaussian_filter(diff_field, sigma=sigma)
+                                    # Use NaN-aware smoothing to prevent expansion of masked regions
+                                    diff_field = self._nan_aware_gaussian_filter(diff_field, sigma)
 
                                 # Plot difference field
                                 im = ax.imshow(diff_field, cmap=difference_params['cmap'],
                                              norm=difference_params['norm'], origin='lower',
-                                             aspect='equal')
+                                             aspect='equal', interpolation='none')
 
                                 # Add tree locations if requested
                                 if settings.get('show_tree_locations', False):
@@ -861,7 +1199,7 @@ class SpatialCoolingPlotter(BasePlotter):
                                 # Just plot absolute values if no base case
                                 im = ax.imshow(field, cmap=absolute_params['cmap'],
                                              vmin=absolute_params['vmin'], vmax=absolute_params['vmax'],
-                                             origin='lower', aspect='equal')
+                                             origin='lower', aspect='equal', interpolation='none')
 
                         except Exception as e:
                             self.logger.warning(f"Error plotting {case_key}: {str(e)}")
@@ -1236,7 +1574,8 @@ class SpatialCoolingPlotter(BasePlotter):
             for col_idx in range(n_cols):
                 ax = axes[0, col_idx]
                 im = ax.imshow(base_data_field, origin='lower', cmap=scale_params['cmap'],
-                              vmin=scale_params['vmin'], vmax=scale_params['vmax'], extent=extent)
+                              vmin=scale_params['vmin'], vmax=scale_params['vmax'], extent=extent,
+                              interpolation='none')
                 ax.set_title(f'Base Case\n{spacings[col_idx]}m column', fontsize=10)
                 ax.set_aspect('equal')
                 if col_idx == 0:
@@ -1271,7 +1610,8 @@ class SpatialCoolingPlotter(BasePlotter):
 
                     if field is not None:
                         im = ax.imshow(field, origin='lower', cmap=scale_params['cmap'],
-                                      vmin=scale_params['vmin'], vmax=scale_params['vmax'], extent=extent)
+                                      vmin=scale_params['vmin'], vmax=scale_params['vmax'], extent=extent,
+                                      interpolation='none')
 
                         # Add grid
                         ax.grid(True, alpha=0.3, color='white', linewidth=0.5)
@@ -1387,7 +1727,8 @@ class SpatialCoolingPlotter(BasePlotter):
             # Plot parent domain
             # Correct orientation: no transpose needed for proper x-y orientation
             im = ax.imshow(parent_temp, origin='lower', cmap=cmap,
-                          vmin=vmin, vmax=vmax, extent=[0, 400, 0, 400])
+                          vmin=vmin, vmax=vmax, extent=[0, 400, 0, 400],
+                          interpolation='none')
             
             # Overlay child domain if requested and available
             if plot_child and child_temp is not None:
@@ -1415,7 +1756,8 @@ class SpatialCoolingPlotter(BasePlotter):
         elif plot_child and child_temp is not None:
             # Only child domain requested or available
             im = ax.imshow(child_temp, origin='lower', cmap=cmap,
-                          vmin=vmin, vmax=vmax, extent=[0, 200, 0, 200])
+                          vmin=vmin, vmax=vmax, extent=[0, 200, 0, 200],
+                          interpolation='none')
         else:
             # No data to plot based on settings
             ax.text(0.5, 0.5, f"No data for selected domains\n{title}", 
@@ -1438,6 +1780,10 @@ class SpatialCoolingPlotter(BasePlotter):
         """
         Extract time-averaged variable data using terrain-following coordinates
 
+        This method delegates to _extract_spatial_data_terrain_following() with hour=None
+        to trigger all-times-average extraction mode. This ensures consistent terrain-following
+        logic across all plot types.
+
         Args:
             dataset: xarray dataset containing variable data
             variable: Variable name to extract
@@ -1447,69 +1793,27 @@ class SpatialCoolingPlotter(BasePlotter):
             2D array of time-averaged variable values
         """
         try:
-            # Determine if this is child domain
-            is_child = 'N02' in dataset.encoding.get('source', '')
+            self.logger.info(
+                f"Extracting time-averaged {variable} using terrain-following "
+                f"(all timesteps average, z_offset={z_offset})"
+            )
 
-            # FIRST: Try to load from terrain mask cache
-            print(f"[fig_3] Attempting cache load for variable={variable}, offset={z_offset}, is_child={is_child}")
-            cached_data = self._load_from_terrain_mask_cache(dataset, variable, z_offset, is_child)
-            if cached_data is not None:
-                print(f"[fig_3] ✓ Using cached terrain-following data for {variable} at offset={z_offset}")
-                self.logger.info(f"Using cached terrain-following data for {variable} at offset={z_offset}")
-                return cached_data
-
-            print(f"[fig_3] ✗ Cache miss - computing terrain-following for {variable} at offset={z_offset}")
-            self.logger.info(f"Cache miss - computing terrain-following for {variable} at offset={z_offset}")
-
-            # Get variable data using VariableMetadata
-            var_data, var_name = self.var_metadata.find_variable_in_dataset(dataset, variable)
-            self.logger.debug(f"Found variable '{var_name}' for terrain-following time-averaged extraction")
-
-            # Check if this is a PCM variable
-            is_pcm = 'zpc_3d' in var_data.dims
-
-            # Get terrain surface coordinate
-            if 'ku_above_surf' not in dataset.coords and 'ku_above_surf' not in dataset.data_vars:
-                self.logger.warning("No ku_above_surf coordinate found, falling back to absolute method")
-                height_m = 2.0  # Default to 2m
-                return self._extract_time_averaged_data(dataset, variable, height_m, is_child)
-
-            ku_above_surf = dataset['ku_above_surf'].values
-
-            # Average over time first
-            var_time_avg = var_data.mean(dim='time')
-
-            # Get dimensions
-            ny, nx = ku_above_surf.shape
-            nz = var_time_avg.shape[0]
-
-            # Initialize result array
-            result = np.full((ny, nx), np.nan)
-
-            # Convert to numpy for faster access
-            data_array = var_time_avg.values
-
-            # For PCM variables: apply zero-to-NaN conversion
-            if is_pcm:
-                zero_threshold = 1e-10
-                data_array = np.where(np.abs(data_array) > zero_threshold, data_array, np.nan)
-
-            # Extract terrain-following data
-            for iy in range(ny):
-                for ix in range(nx):
-                    terrain_idx = int(ku_above_surf[iy, ix])
-                    target_idx = terrain_idx + z_offset
-
-                    if 0 <= target_idx < nz:
-                        result[iy, ix] = data_array[target_idx, iy, ix]
-
-            # Clean invalid data before returning
-            result = self._clean_invalid_data(result, variable)
+            # Delegate to _extract_spatial_data_terrain_following with hour=None
+            # This triggers 'all_times_average' mode in _determine_time_mode()
+            # which properly uses the terrain_helper for on-the-fly computation
+            result = self._extract_spatial_data_terrain_following(
+                dataset=dataset,
+                variable=variable,
+                hour=None,  # None triggers all_times_average mode
+                z_offset=z_offset
+            )
 
             return result
 
         except Exception as e:
             self.logger.error(f"Error extracting terrain-following time-averaged data: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             # Determine appropriate array size
             is_child = 'N02' in dataset.encoding.get('source', '')
             return np.full((200, 200) if is_child else (400, 400), np.nan)
@@ -1590,8 +1894,12 @@ class SpatialCoolingPlotter(BasePlotter):
             # Average over time dimension
             var_avg = var_at_height.mean(dim='time')
 
+            # Clean invalid data (convert zeros to NaN for proper masking)
+            result = var_avg.values
+            result = self._clean_invalid_data(result, variable)
+
             # Return the values without transposing to maintain correct orientation
-            return var_avg.values
+            return result
 
         except Exception as e:
             self.logger.error(f"Error extracting time-averaged data for variable '{variable}': {str(e)}")

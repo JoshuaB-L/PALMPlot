@@ -257,7 +257,7 @@ class TerrainMaskWriter:
             'Conventions': 'CF-1.7',
             'creation_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S %z'),
             'data_content': 'terrain_following_mask',
-            'version': 1,
+            'version': 2,  # Updated to version 2 for enhanced naming support
 
             # Terrain-following specific
             'terrain_following_method': 'lowest_level_upward',
@@ -266,6 +266,10 @@ class TerrainMaskWriter:
             'max_z_index': metadata.get('max_z_index', 0),
             'vertical_levels_stored': metadata.get('n_levels', 0),
             'zu_3d_coordinate_name': 'zu_3d',
+
+            # Enhanced naming metadata (NEW in version 2)
+            'building_mask_mode': 'masked' if metadata.get('buildings_mask_applied', True) else 'unmasked',
+            'time_selection_mode': metadata.get('time_selection_mode', 'all_times_average'),
 
             # Domain information
             'domain_type': metadata.get('domain_type', 'unknown'),
@@ -278,6 +282,16 @@ class TerrainMaskWriter:
             'author': metadata.get('author', 'PALMPlot'),
             'institution': metadata.get('institution', ''),
         }
+
+        # Add time range if specified (for time_window mode)
+        if 'time_range_start' in metadata:
+            attrs['time_range_start'] = metadata['time_range_start']
+        if 'time_range_end' in metadata:
+            attrs['time_range_end'] = metadata['time_range_end']
+
+        # Add time index if specified (for single_time mode)
+        if 'time_index' in metadata:
+            attrs['time_index'] = metadata['time_index']
 
         # Add optional attributes
         if 'origin_x' in metadata:
@@ -511,7 +525,10 @@ class TerrainMaskReader:
                                  mask_metadata: Dict,
                                  expected_grid_size: Tuple[int, int],
                                  expected_domain: str,
-                                 validation_settings: Optional[Dict] = None) -> Tuple[bool, List[str]]:
+                                 validation_settings: Optional[Dict] = None,
+                                 expected_time_mode: Optional[str] = None,
+                                 expected_time_params: Optional[Dict] = None,
+                                 expected_building_mask: Optional[bool] = None) -> Tuple[bool, List[str]]:
         """
         Check if loaded mask is compatible with current extraction settings.
 
@@ -520,6 +537,9 @@ class TerrainMaskReader:
             expected_grid_size: Expected (ny, nx)
             expected_domain: Expected domain type ('parent' or 'child')
             validation_settings: Optional validation settings from config
+            expected_time_mode: Expected time selection mode (optional)
+            expected_time_params: Expected time parameters (optional)
+            expected_building_mask: Expected building mask setting (optional)
 
         Returns:
             (is_compatible, list_of_issues)
@@ -555,6 +575,46 @@ class TerrainMaskReader:
             if zu_3d_name != 'zu_3d':
                 issues.append(
                     f"Unexpected z-coordinate name: '{zu_3d_name}' (expected 'zu_3d')"
+                )
+
+        # Check time selection mode if specified (NEW in version 2)
+        if expected_time_mode is not None and settings.get('check_time_mode', True):
+            mask_time_mode = attrs.get('time_selection_mode', 'all_times_average')
+            if mask_time_mode != expected_time_mode:
+                issues.append(
+                    f"Time mode mismatch: mask is '{mask_time_mode}', expected '{expected_time_mode}'"
+                )
+
+            # Check time parameters if relevant
+            if expected_time_mode == 'time_window' and expected_time_params:
+                mask_start = attrs.get('time_range_start', None)
+                mask_end = attrs.get('time_range_end', None)
+                expected_start = expected_time_params.get('start', None)
+                expected_end = expected_time_params.get('end', None)
+
+                if mask_start != expected_start or mask_end != expected_end:
+                    issues.append(
+                        f"Time window mismatch: mask is [{mask_start}, {mask_end}], "
+                        f"expected [{expected_start}, {expected_end}]"
+                    )
+
+            elif expected_time_mode == 'single_time' and expected_time_params:
+                mask_time_idx = attrs.get('time_index', None)
+                expected_idx = expected_time_params.get('hour', None)
+
+                if mask_time_idx != expected_idx:
+                    issues.append(
+                        f"Time index mismatch: mask is {mask_time_idx}, expected {expected_idx}"
+                    )
+
+        # Check building mask mode if specified (NEW in version 2)
+        if expected_building_mask is not None and settings.get('check_building_mask', True):
+            mask_building_mode = attrs.get('building_mask_mode', 'masked')
+            expected_mode = 'masked' if expected_building_mask else 'unmasked'
+
+            if mask_building_mode != expected_mode:
+                issues.append(
+                    f"Building mask mismatch: mask is '{mask_building_mode}', expected '{expected_mode}'"
                 )
 
         is_compatible = len(issues) == 0

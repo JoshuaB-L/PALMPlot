@@ -85,6 +85,70 @@ class ConfigHandler:
             },
             'plots': {
                 'global_settings': dict,
+                # Global terrain-following configuration (shared by all figures)
+                SchemaOptional('terrain_following'): {
+                    'default_method': Or('terrain_following', 'slice'),
+                    'buildings_mask': bool,
+                    SchemaOptional('buildings_mask_mode'): Or('static_mask', 'natural_mask'),
+                    'time_selection_method': Or('mean', 'mean_timeframe', 'single_timestep'),
+                    SchemaOptional('time_start'): int,
+                    SchemaOptional('time_end'): int,
+                    SchemaOptional('time_index'): int,
+
+                    # Terrain mask cache configuration
+                    'mask_cache': {
+                        'enabled': bool,
+                        'mode': Or('auto', 'load', 'save'),
+                        'cache_directory': str,
+                        'levels': {
+                            'max_levels': And(int, lambda n: n > 0),
+                            'offsets': [int]
+                        },
+                        'compression': {
+                            'enabled': bool,
+                            'level': And(int, lambda n: 1 <= n <= 9)
+                        },
+                        'validation': {
+                            'check_grid_size': bool,
+                            'check_domain_type': bool,
+                            'check_z_coordinate': bool,
+                            'check_time_mode': bool,
+                            'check_building_mask': bool,
+                            SchemaOptional('max_age_days'): Or(int, type(None)),
+                            'on_mismatch': Or('warn', 'recompute', 'error')
+                        }
+                    },
+
+                    # Surface data cache configuration
+                    'surface_data_cache': {
+                        'enabled': bool,
+                        'mode': Or('auto', 'load', 'save'),
+                        'cache_directory': str,
+                        'compression': {
+                            'enabled': bool,
+                            'level': And(int, lambda n: 1 <= n <= 9)
+                        },
+                        'validation': {
+                            'check_grid_size': bool,
+                            'check_domain_type': bool,
+                            SchemaOptional('check_time_mode'): bool,
+                            SchemaOptional('max_age_days'): Or(int, type(None)),
+                            'on_mismatch': Or('warn', 'recompute', 'error')
+                        }
+                    },
+
+                    # Domain-specific settings
+                    'parent': {
+                        'start_z_index': And(int, lambda n: n >= 0),
+                        'max_z_index': And(int, lambda n: n >= 0),
+                        SchemaOptional('transect_z_offset'): int
+                    },
+                    'child': {
+                        'start_z_index': And(int, lambda n: n >= 0),
+                        'max_z_index': And(int, lambda n: n >= 0),
+                        SchemaOptional('transect_z_offset'): int
+                    }
+                },
                 # Accept either 'slides' (legacy) or 'figures' (new)
                 SchemaOptional('slides'): dict,
                 SchemaOptional('figures'): dict
@@ -149,6 +213,7 @@ class ConfigHandler:
         # Additional custom validations
         self._validate_paths()
         self._validate_variables()
+        self._validate_global_terrain_following()
         self._validate_plot_settings()
         
     def _validate_paths(self):
@@ -231,6 +296,110 @@ class ConfigHandler:
                     )
 
         self.logger.info(f"Validated {len(variables)} variable definitions")
+
+    def _validate_global_terrain_following(self):
+        """Validate global terrain_following configuration"""
+        plots_config = self.config.get('plots', {})
+        tf_config = plots_config.get('terrain_following')
+
+        # Terrain-following is optional, so if not present, skip validation
+        if tf_config is None:
+            self.logger.debug("No global terrain_following configuration found (optional)")
+            return
+
+        self.logger.info("Validating global terrain_following configuration")
+
+        # Validate time selection consistency
+        time_method = tf_config.get('time_selection_method')
+        if time_method == 'mean_timeframe':
+            if 'time_start' not in tf_config or 'time_end' not in tf_config:
+                raise ValueError(
+                    "terrain_following.time_selection_method='mean_timeframe' requires "
+                    "'time_start' and 'time_end' parameters"
+                )
+            if tf_config['time_start'] >= tf_config['time_end']:
+                raise ValueError(
+                    f"terrain_following: time_start ({tf_config['time_start']}) must be "
+                    f"less than time_end ({tf_config['time_end']})"
+                )
+        elif time_method == 'single_timestep':
+            if 'time_index' not in tf_config:
+                raise ValueError(
+                    "terrain_following.time_selection_method='single_timestep' requires "
+                    "'time_index' parameter"
+                )
+
+        # Validate mask cache settings
+        mask_cache = tf_config.get('mask_cache', {})
+        if mask_cache.get('enabled', False):
+            cache_dir = Path(mask_cache['cache_directory']).expanduser().resolve()
+
+            # Create cache directory if it doesn't exist (only in auto/save modes)
+            if mask_cache['mode'] in ['auto', 'save']:
+                try:
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    self.logger.info(f"Terrain mask cache directory: {cache_dir}")
+                except Exception as e:
+                    raise ValueError(
+                        f"Cannot create terrain mask cache directory {cache_dir}: {e}"
+                    )
+
+            # Check if directory exists and is writable (for save mode)
+            elif mask_cache['mode'] == 'load':
+                if not cache_dir.exists():
+                    raise ValueError(
+                        f"Terrain mask cache mode='load' but directory does not exist: {cache_dir}"
+                    )
+                if not cache_dir.is_dir():
+                    raise ValueError(
+                        f"Terrain mask cache directory is not a directory: {cache_dir}"
+                    )
+
+            # Validate offsets list is non-empty and sorted
+            offsets = mask_cache.get('levels', {}).get('offsets', [])
+            if not offsets:
+                raise ValueError("terrain_following.mask_cache.levels.offsets cannot be empty")
+
+            if offsets != sorted(offsets):
+                self.logger.warning(
+                    f"terrain_following.mask_cache.levels.offsets should be sorted: {offsets}"
+                )
+
+        # Validate surface data cache settings
+        surface_cache = tf_config.get('surface_data_cache', {})
+        if surface_cache.get('enabled', False):
+            cache_dir = Path(surface_cache['cache_directory']).expanduser().resolve()
+
+            # Create cache directory if it doesn't exist
+            if surface_cache['mode'] in ['auto', 'save']:
+                try:
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    self.logger.info(f"Surface data cache directory: {cache_dir}")
+                except Exception as e:
+                    raise ValueError(
+                        f"Cannot create surface data cache directory {cache_dir}: {e}"
+                    )
+
+            elif surface_cache['mode'] == 'load':
+                if not cache_dir.exists():
+                    raise ValueError(
+                        f"Surface data cache mode='load' but directory does not exist: {cache_dir}"
+                    )
+
+        # Validate domain-specific settings
+        for domain in ['parent', 'child']:
+            domain_settings = tf_config.get(domain, {})
+            if domain_settings:
+                start_z = domain_settings.get('start_z_index', 0)
+                max_z = domain_settings.get('max_z_index', 0)
+
+                if start_z > max_z:
+                    raise ValueError(
+                        f"terrain_following.{domain}: start_z_index ({start_z}) cannot be "
+                        f"greater than max_z_index ({max_z})"
+                    )
+
+        self.logger.info("✓ Global terrain_following configuration validated successfully")
 
     def _validate_plot_settings(self):
         """Validate plot-specific settings for both slides and figures"""
