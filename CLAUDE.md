@@ -147,6 +147,39 @@ python -m palmplot_thf palmplot_config_fig3_test.yaml
 - The `_get_plot_settings()` helper handles both 'figures' and 'slides' config structures
 - Legacy slide-based configuration still supported for backward compatibility
 
+### Spatial Smoothing Configuration
+
+Spatial smoothing can be applied to **difference fields** (e.g., base case - tree case) in fig_3 daytime/nighttime cooling plots. Smoothing is implemented using NaN-aware Gaussian filtering that preserves masked region boundaries.
+
+**Figure-Specific Control** (Recommended):
+```yaml
+plots:
+  figures:
+    fig_3:
+      settings:
+        apply_smoothing: false  # Set to true to enable smoothing
+        smoothing_sigma: 1.0    # Gaussian kernel sigma (only used if apply_smoothing: true)
+```
+
+**Global Control** (Legacy):
+```yaml
+analysis:
+  spatial:
+    grid_interpolation: true   # Global smoothing enable/disable
+    smoothing_sigma: 1.0       # Global sigma value
+```
+
+**Behavior**:
+- Figure-specific settings take precedence over global settings
+- Only applies to difference fields (tree case - base case), not absolute temperature fields
+- Uses NaN-aware smoothing to prevent expansion of masked regions
+- Set `apply_smoothing: false` for sharp, pixel-perfect boundaries
+- Set `apply_smoothing: true` for smoother visual appearance (may blur fine details)
+
+**When to Use**:
+- **Sharp boundaries** (`false`): Best for publication-quality plots where precise spatial patterns matter
+- **Smoothed** (`true`): Better for presentations when visual smoothness is preferred over precision
+
 ### Terrain-Following Extraction and Enhanced Caching
 
 **Overview**

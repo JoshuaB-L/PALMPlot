@@ -1181,10 +1181,23 @@ class SpatialCoolingPlotter(BasePlotter):
                                 diff_field = self._calculate_cooling_effect(field, base_field)
 
                                 # Apply NaN-aware smoothing if configured
-                                if self.config['analysis']['spatial']['grid_interpolation']:
-                                    sigma = self.config['analysis']['spatial']['smoothing_sigma']
+                                # Check figure-specific setting first, then fall back to global setting
+                                apply_smoothing = settings.get('apply_smoothing')
+                                if apply_smoothing is None:
+                                    # Fall back to global setting
+                                    apply_smoothing = self.config.get('analysis', {}).get('spatial', {}).get('grid_interpolation', False)
+
+                                if apply_smoothing:
+                                    # Check figure-specific sigma first, then fall back to global
+                                    sigma = settings.get('smoothing_sigma')
+                                    if sigma is None:
+                                        sigma = self.config.get('analysis', {}).get('spatial', {}).get('smoothing_sigma', 1.0)
+
                                     # Use NaN-aware smoothing to prevent expansion of masked regions
                                     diff_field = self._nan_aware_gaussian_filter(diff_field, sigma)
+                                    self.logger.info(f"Applied spatial smoothing to difference field (sigma={sigma})")
+                                else:
+                                    self.logger.info("Spatial smoothing disabled for difference field")
 
                                 # Plot difference field
                                 im = ax.imshow(diff_field, cmap=difference_params['cmap'],

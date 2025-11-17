@@ -1,0 +1,278 @@
+# =============================================================================
+# PALMPLOT TEST CONFIGURATION - FIG_3 TERRAIN-FOLLOWING & TIME WINDOWS
+# =============================================================================
+# This configuration tests the enhanced fig_3 implementation with:
+# - Terrain-following extraction with enhanced cache naming
+# - Time window variations (single hour, time range, all times)
+# - Variable selection and auto-scaling
+# - PCM variable support
+# - Building mask toggle
+
+general:
+  project_name: "THF Forest LAD Study - Fig 3 Testing"
+  description: "Testing fig_3 terrain-following with time windows and enhanced caching"
+  stop_on_error: false
+  parallel_processing: false
+  n_workers: 4
+
+# =============================================================================
+# DATA CONFIGURATION
+# =============================================================================
+data:
+  simulation_base_path: "/mnt/f/phd/thf_forest_study/thf_forest_lad_cases_000"
+  tree_locations_path: "/mnt/f/phd/thf_forest_study/thf_forest_lad_cases_000/tree_locations"
+  lad_wad_data_path: "/mnt/f/phd/thf_forest_study/thf_forest_lad_cases_000/lad_wad_data"
+
+  # Test with subset of scenarios for faster testing
+  spacings: [10]  # Reduced from [10, 15, 20, 25]
+  ages: [20]      # Reduced from [20, 40, 60, 80]
+
+  domains:
+    parent:
+      resolution: 10.0
+      grid_size: [40, 40]
+      first_data_level: 25
+    child:
+      resolution: 2.0
+      grid_size: [100, 100]
+      first_data_level: 21
+
+  file_patterns:
+    av_3d: "{case_name}_av_3d_merged.nc"
+    av_3d_n02: "{case_name}_av_3d_N02_merged.nc"
+    av_xy: "{case_name}_av_xy_merged.nc"
+    av_xy_n02: "{case_name}_av_xy_N02_merged.nc"
+    static: "{case_name}_static"
+    static_n02: "{case_name}_static_N02"
+
+  # Variable definitions
+  variables:
+    temperature:
+      palm_name: "ta"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "°C"
+      units_out: "°C"
+      conversion: "none"
+      colormap: "RdBu_r"
+      value_range: "auto"
+      label: "Air Temperature"
+      terrain_following: true
+
+    humidity_q:
+      palm_name: "q"
+      file_type: "av_3d"
+      z_coordinate: "zu_3d"
+      units_in: "kg/kg"
+      units_out: "g/kg"
+      conversion: "multiply_1000"
+      colormap: "YlGnBu"
+      value_range: "auto"
+      label: "Specific Humidity"
+      terrain_following: true
+
+    pcm_lad:
+      palm_name: "pcm_lad"
+      file_type: "av_3d"
+      z_coordinate: "zpc_3d"
+      units_in: "m^2/m^3"
+      units_out: "m^2/m^3"
+      conversion: "none"
+      colormap: "Greens"
+      value_range: "auto"
+      label: "Leaf Area Density"
+      terrain_following: true
+
+# =============================================================================
+# OUTPUT CONFIGURATION
+# =============================================================================
+output:
+  base_directory: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/000_logs/test_fig3_terrain_following"
+  formats: ["png"]  # Just PNG for testing
+  dpi: 150
+  transparent_background: false
+  file_naming:
+    prefix: "test_fig3"
+    include_timestamp: true
+    separator: "_"
+
+# =============================================================================
+# PLOTS CONFIGURATION
+# =============================================================================
+plots:
+  global_settings:
+    figure_size: [12, 8]
+    font_family: "DejaVu Sans"
+    font_size: 10
+    title_font_size: 14
+    label_font_size: 12
+    legend_font_size: 10
+    grid: true
+    grid_alpha: 0.3
+
+    color_schemes:
+      temperature: "RdBu_r"
+      cooling: "Blues"
+      density: "Greens"
+      age: ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+      spacing: ["#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+
+  # ============================================================
+  # GLOBAL TERRAIN-FOLLOWING CONFIGURATION (Shared by all figures)
+  # ============================================================
+  terrain_following:
+    default_method: 'terrain_following'
+    buildings_mask: true
+    buildings_mask_mode: 'natural_mask'  # Options: 'natural_mask' (default, fill-value based) or 'static_mask' (2D mask from buildings_2d)
+    time_selection_method: 'mean'
+
+    mask_cache:
+      enabled: true
+      mode: 'auto'
+      cache_directory: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/000_logs/cache/terrain_masks"
+      levels:
+        max_levels: 25
+        offsets: [0, 1, 2, 5, 10]
+      compression:
+        enabled: true
+        level: 4
+      validation:
+        check_grid_size: true
+        check_domain_type: true
+        check_z_coordinate: true
+        check_time_mode: true
+        check_building_mask: true
+        max_age_days: 30
+        on_mismatch: 'recompute'
+
+    surface_data_cache:
+      enabled: true
+      mode: 'auto'
+      cache_directory: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/000_logs/cache/surface_data"
+      compression:
+        enabled: true
+        level: 4
+      validation:
+        check_grid_size: true
+        check_domain_type: true
+        check_time_mode: true
+        max_age_days: 30
+        on_mismatch: 'recompute'
+
+    parent:
+      start_z_index: 0
+      max_z_index: 10
+    child:
+      start_z_index: 0
+      max_z_index: 25
+
+  # ============================================================
+  # FIG_3 CONFIGURATION - Testing terrain-following & time windows
+  # ============================================================
+  figures:
+    fig_3:
+      enabled: true
+      title: "Fig 3 Test - Terrain-Following with Time Windows"
+      description: "Testing single hour, time window, and variable selection"
+
+      # TEST: Variable selection (change to 'humidity_q' to test different variable)
+      variable: "temperature"
+
+      plot_types:
+        daytime_cooling: true      # Test time window extraction
+        nighttime_cooling: true    # Test time window extraction
+        cooling_extent: false
+        temperature_maps: true
+
+      settings:
+        # TEST: Terrain-following extraction
+        extraction_method: "terrain_following"  # Change to 'slice' to test legacy method
+
+        # For terrain_following method
+        terrain_mask_height_z: 0  # 0 = first grid point above terrain
+
+        # For slice method (if extraction_method: 'slice')
+        analysis_height: 0  # meters above sea level
+
+        # TEST SCENARIO 1: Time window for daytime (simulation hours 33-42)
+        daytime_hour: [33, 42]  # Average over hours 33-42
+
+        # TEST SCENARIO 2: Single hour for nighttime
+        nighttime_hour: 6  # Single hour at 6 AM
+
+        # Spatial smoothing for difference fields (daytime/nighttime cooling)
+        # Set to false for sharp boundaries, true for smoothed visualization
+        apply_smoothing: false  # Disable smoothing for sharp difference fields
+        smoothing_sigma: 1.0    # Gaussian sigma (only used if apply_smoothing: true)
+
+        # Variable-specific auto-scaling
+        variable_settings:
+          temperature:
+            auto_scale: true
+            cmap: "RdBu_r"
+            difference:
+              auto_scale: true
+              cmap: "RdBu_r"
+
+          humidity_q:
+            auto_scale: true
+            percentile_clip: 2
+            cmap: "YlGnBu"
+            difference:
+              auto_scale: true
+              cmap: "BrBG"
+
+        # Domain settings
+        plot_parent_domain: false  # Focus on child domain for faster testing
+        plot_child_domain: true
+
+        # Visualization settings
+        show_tree_locations: false
+        show_edge_effects: true
+
+# =============================================================================
+# ANALYSIS SETTINGS
+# =============================================================================
+analysis:
+  temperature:
+    reference_height: 0
+    analysis_times: ["daily_max", "daily_min", "daily_mean"]
+    cooling_threshold: 0.5
+
+  spatial:
+    grid_interpolation: true
+    smoothing_sigma: 1.0
+    edge_buffer: 5
+
+  statistics:
+    confidence_level: 0.95
+    bootstrap_iterations: 1000
+    include_uncertainty: false
+
+# =============================================================================
+# LOGGING SETTINGS
+# =============================================================================
+logging:
+  level: "INFO"
+  log_file: "/home/joshuabl/phd/thf_forest_study/code/python/palmplot_thf/000_logs/test_fig3_terrain_following.log"
+  console_output: true
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# =============================================================================
+# PERFORMANCE CONFIGURATION
+# =============================================================================
+performance:
+  chunk_size: 100
+  cache_data: true
+  compress_output: false
+  multiprocessing: false
+
+# =============================================================================
+# VALIDATION CONFIGURATION
+# =============================================================================
+validation:
+  check_data_completeness: true
+  validate_units: true
+  check_missing_values: true
+  warn_on_outliers: true
+  outlier_threshold: 3.0
